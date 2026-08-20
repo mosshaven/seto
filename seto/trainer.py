@@ -1,4 +1,4 @@
-"""Seto trainer — base pretraining and cooldown."""
+"""Seto trainer — pretraining with FP16, SDPA, full checkpoints."""
 
 import math
 import os
@@ -66,7 +66,12 @@ class SetoTrainer:
             weight_decay=self.config.weight_decay,
         )
 
-        self.scaler = GradScaler(enabled=self.config.use_bf16 and self.device.type == "cuda")
+        # FP16 for T4 (Turing) — bf16 not supported on T4
+        use_amp = (self.config.use_fp16 or self.config.use_bf16) and self.device.type == "cuda"
+        dtype = torch.bfloat16 if self.config.use_bf16 else torch.float16
+        self.scaler = GradScaler(enabled=use_amp and not self.config.use_bf16)
+        self.amp_dtype = dtype if use_amp else None
+
         self.scheduler = get_cosine_schedule(
             self.optimizer, self.config.warmup_steps, self.config.max_steps, self.config.min_lr
         )
@@ -74,6 +79,7 @@ class SetoTrainer:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.global_step = 0
+        self.tokens_seen = 0
         self.best_val_loss = float("inf")
 
         self._setup_dataloader()
@@ -81,13 +87,13 @@ class SetoTrainer:
     def _setup_dataloader(self):
         from torch.utils.data import DataLoader
         sampler = None
-        if self.local_rank >= 0:
+        if self.local_rank >= 0 and hasattr(self.train_dataset, '__len__'):
             sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset)
 
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.config.batch_size,
-            shuffle=(sampler is None),
+            shuffle=(sampler is None and hasattr(self.train_dataset, '__len__')),
             num_workers=self.config.num_workers,
             pin_memory=True,
             drop_last=True,
@@ -112,17 +118,20 @@ class SetoTrainer:
             self.optimizer, str(self.device)
         )
         self.global_step = meta.get("step", 0)
+        self.tokens_seen = meta.get("tokens_seen", 0)
         for _ in range(self.global_step):
             self.scheduler.step()
         if self.is_main:
-            print(f"Resumed from step {self.global_step}")
+            print(f"Resumed from step {self.global_step} ({self.tokens_seen:,} tokens)")
 
     def train(self):
         if self.is_main:
+            m = self.model.module if hasattr(self.model, "module") else self.model
             print(f"Pretraining | Steps: {self.config.max_steps} | LR: {self.config.lr}")
-            print(f"Model params: {(self.model.module if hasattr(self.model, 'module') else self.model).count_parameters():,}")
+            print(f"Model params: {m.count_parameters():,}")
             print(f"Effective batch size: {self.config.effective_batch_size}")
             print(f"Tokens per step: ~{self.config.tokens_per_step:,}")
+            print(f"FP16: {self.config.use_fp16} | Grad checkpoint: {self.config.use_gradient_checkpointing}")
 
         self.model.train()
         running_loss = 0.0
@@ -139,24 +148,36 @@ class SetoTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                use_amp = self.config.use_bf16 and self.device.type == "cuda"
-                with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                use_amp = self.amp_dtype is not None
+                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=use_amp):
                     _, loss = self.model(input_ids, targets=labels)
                     loss = loss / self.config.grad_accum_steps
 
-                self.scaler.scale(loss).backward()
+                if self.config.use_fp16 and not self.config.use_bf16:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 running_loss += loss.item()
 
                 if (batch_idx + 1) % self.config.grad_accum_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
+                    if self.config.use_fp16 and not self.config.use_bf16:
+                        self.scaler.unscale_(self.optimizer)
+
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.config.max_grad_norm
                     )
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+
+                    if self.config.use_fp16 and not self.config.use_bf16:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+
                     self.optimizer.zero_grad(set_to_none=True)
                     self.scheduler.step()
                     self.global_step += 1
+                    self.tokens_seen += self.config.tokens_per_step
 
                     if self.is_main and self.global_step % self.config.log_every == 0:
                         elapsed = time.time() - start_time
@@ -167,8 +188,9 @@ class SetoTrainer:
                             f"Step {self.global_step:>6d} | "
                             f"Loss {avg_loss:.4f} | "
                             f"LR {lr:.2e} | "
-                            f"Tokens/s {tokens_sec:,.0f} | "
-                            f"Time {elapsed:.1f}s"
+                            f"Tokens {self.tokens_seen:,} | "
+                            f"{tokens_sec:,.0f} tok/s | "
+                            f"{elapsed:.1f}s"
                         )
                         running_loss = 0.0
                         start_time = time.time()
@@ -192,8 +214,8 @@ class SetoTrainer:
         for batch in self.val_loader:
             input_ids = batch["input_ids"].to(self.device, non_blocking=True)
             labels = batch["labels"].to(self.device, non_blocking=True)
-            use_amp = self.config.use_bf16 and self.device.type == "cuda"
-            with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            use_amp = self.amp_dtype is not None
+            with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=use_amp):
                 _, loss = self.model(input_ids, targets=labels)
             total_loss += loss.item()
             n_batches += 1
@@ -204,6 +226,7 @@ class SetoTrainer:
         config_dict = {
             "stage": self.config.stage,
             "global_step": self.global_step,
+            "tokens_seen": self.tokens_seen,
             "best_val_loss": self.best_val_loss,
         }
         save_checkpoint(

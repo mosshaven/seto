@@ -1,4 +1,4 @@
-"""Seto-1B: Decoder-only Transformer with GQA, SwiGLU, RoPE, RMSNorm."""
+"""Seto-1B: Decoder-only Transformer with GQA, SwiGLu, RoPE, RMSNorm, SDPA."""
 
 import math
 from typing import Optional, Tuple
@@ -78,17 +78,16 @@ class GroupedQueryAttention(nn.Module):
         k = self.repeat_kv(k)
         v = self.repeat_kv(v)
 
-        scale = 1.0 / math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+        # Use PyTorch SDPA — auto-selects best backend (FlashAttention, memory-efficient, math)
+        # Works on T4 (Turing) without manual FlashAttention install
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=mask[:, :, :T, :T] if mask is not None else None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=(mask is None),
+        )
 
-        if mask is not None:
-            attn = attn.masked_fill(mask[:, :, :T, :T] == 0, float("-inf"))
-
-        attn = F.softmax(attn, dim=-1)
-        attn = self.attn_dropout(attn)
-
-        out = torch.matmul(attn, v)
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        out = attn_output.transpose(1, 2).contiguous().view(B, T, -1)
         return self.resid_dropout(self.o_proj(out))
 
 
@@ -141,8 +140,8 @@ class SetoLM(nn.Module):
         freqs_cis = precompute_freqs_cis(config.head_dim, config.max_seq_len * 2, config.rope_theta)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
-        mask = torch.tril(torch.ones(config.max_seq_len, config.max_seq_len))
-        self.register_buffer("mask", mask.unsqueeze(0).unsqueeze(0), persistent=False)
+        # No explicit causal mask needed — SDPA handles is_causal=True
+        self.register_buffer("mask", torch.empty(0), persistent=False)
 
         self.apply(self._init_weights)
 
@@ -166,7 +165,7 @@ class SetoLM(nn.Module):
         freqs_cis = self.freqs_cis[:T]
 
         for layer in self.layers:
-            x = layer(x, freqs_cis, self.mask)
+            x = layer(x, freqs_cis)
 
         x = self.norm(x)
         logits = self.output(x)

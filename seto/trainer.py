@@ -1,4 +1,4 @@
-"""Seto trainer — optimized for 2xGPU Kaggle training."""
+"""Seto trainer — base pretraining and cooldown."""
 
 import math
 import os
@@ -12,7 +12,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
-from .config import ModelConfig, TrainingConfig
+from .config import ModelConfig, TrainConfig
 
 
 def setup_distributed(local_rank: int):
@@ -44,10 +44,10 @@ class SetoTrainer:
         model: nn.Module,
         train_dataset,
         val_dataset=None,
-        config: Optional[TrainingConfig] = None,
+        config: Optional[TrainConfig] = None,
         local_rank: int = -1,
     ):
-        self.config = config or TrainingConfig()
+        self.config = config or TrainConfig()
         self.local_rank = local_rank
         self.is_main = local_rank in [-1, 0]
 
@@ -79,11 +79,12 @@ class SetoTrainer:
         self._setup_dataloader()
 
     def _setup_dataloader(self):
+        from torch.utils.data import DataLoader
         sampler = None
         if self.local_rank >= 0:
             sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset)
 
-        self.train_loader = torch.utils.data.DataLoader(
+        self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.config.batch_size,
             shuffle=(sampler is None),
@@ -95,7 +96,7 @@ class SetoTrainer:
         self.train_sampler = sampler
 
         if self.val_dataset is not None:
-            self.val_loader = torch.utils.data.DataLoader(
+            self.val_loader = DataLoader(
                 self.val_dataset,
                 batch_size=self.config.batch_size,
                 shuffle=False,
@@ -118,7 +119,7 @@ class SetoTrainer:
 
     def train(self):
         if self.is_main:
-            print(f"Starting training from step {self.global_step}")
+            print(f"Pretraining | Steps: {self.config.max_steps} | LR: {self.config.lr}")
             print(f"Model params: {(self.model.module if hasattr(self.model, 'module') else self.model).count_parameters():,}")
             print(f"Effective batch size: {self.config.effective_batch_size}")
             print(f"Tokens per step: ~{self.config.tokens_per_step:,}")
@@ -201,7 +202,7 @@ class SetoTrainer:
 
     def _save_checkpoint(self, loss: float, is_best: bool = False):
         config_dict = {
-            "model": self.config.__class__.__name__,
+            "stage": self.config.stage,
             "global_step": self.global_step,
             "best_val_loss": self.best_val_loss,
         }

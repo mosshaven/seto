@@ -15,7 +15,7 @@ checkpoints/
 *.bin
 
 wandb/
-.ml儿
+.ml
 .env
 
 .ipynb_checkpoints/

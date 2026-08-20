@@ -32,6 +32,7 @@ def parse_args():
     p.add_argument("--init-from", default=None, help="Load model weights from previous stage")
     p.add_argument("--local-rank", type=int, default=-1)
     p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--grad-accum", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--fp16", action="store_true", default=True)
@@ -73,6 +74,8 @@ def main():
 
         if args.batch_size:
             train_config.batch_size = args.batch_size
+        if args.grad_accum:
+            train_config.grad_accum_steps = args.grad_accum
         if args.lr:
             train_config.lr = args.lr
         if args.max_steps:

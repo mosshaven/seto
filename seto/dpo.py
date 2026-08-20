@@ -84,8 +84,12 @@ class DPOTrainer:
             self.optimizer, str(self.device)
         )
         self.global_step = meta.get("step", 0)
-        for _ in range(self.global_step):
-            self.scheduler.step()
+        # Restore scheduler state
+        if "scheduler" in meta and meta["scheduler"] is not None:
+            self.scheduler.load_state_dict(meta["scheduler"])
+        elif self.global_step > 0:
+            for _ in range(self.global_step):
+                self.scheduler.step()
         # Restore RNG
         if "rng" in meta:
             rng = meta["rng"]

@@ -123,9 +123,13 @@ class SetoTrainer:
         self.global_step = meta.get("step", 0)
         self.tokens_seen = meta.get("tokens_seen", 0)
 
-        # Restore scheduler
-        for _ in range(self.global_step):
-            self.scheduler.step()
+        # Restore scheduler state
+        if "scheduler" in meta and meta["scheduler"] is not None:
+            self.scheduler.load_state_dict(meta["scheduler"])
+        elif self.global_step > 0:
+            # Fallback: step N times (less exact)
+            for _ in range(self.global_step):
+                self.scheduler.step()
 
         # Restore RNG state
         if "rng" in meta:

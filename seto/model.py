@@ -30,8 +30,10 @@ def precompute_freqs_cis(dim: int, max_seq_len: int, theta: float = 10000.0):
 
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    # x: [B, heads, T, head_dim]
+    # freqs_cis: [T, head_dim//2] -> [1, 1, T, head_dim//2]
     x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)
+    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(0)
     x_rot = torch.view_as_real(x_complex * freqs_cis).flatten(-2)
     return x_rot.type_as(x)
 

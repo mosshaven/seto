@@ -11,7 +11,7 @@ from .sft import SFTTrainer
 from .dpo import DPOTrainer
 from .data_filter import filter_text, detect_language, compute_quality_score
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "ModelConfig", "TrainConfig",
     "MODEL_TINY", "MODEL_SMALL", "MODEL_BASE",

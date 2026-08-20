@@ -63,6 +63,14 @@ def main():
         }
         train_config = stage_map[args.stage]
 
+        # Set DDP-aware config values
+        import torch.distributed as dist
+        if dist.is_initialized():
+            train_config.world_size = dist.get_world_size()
+
+        # Sync max_seq_len from model config
+        train_config.max_seq_len = model_config.max_seq_len
+
         if args.batch_size:
             train_config.batch_size = args.batch_size
         if args.lr:
@@ -109,11 +117,7 @@ def main():
             if args.resume:
                 trainer.resume(args.resume)
             elif args.init_from:
-                # Load model weights from pretrain, reset optimizer
-                from seto.checkpoint import load_checkpoint
-                load_checkpoint(args.init_from, model)
-                if is_main:
-                    print(f"Loaded pretrain weights from {args.init_from}")
+                trainer.init_from(args.init_from)
             else:
                 latest = get_latest_checkpoint(train_config.checkpoint_dir)
                 if latest:
@@ -139,8 +143,7 @@ def main():
             if args.resume:
                 trainer.resume(args.resume)
             elif args.init_from:
-                from seto.checkpoint import load_checkpoint
-                load_checkpoint(args.init_from, model)
+                trainer.init_from(args.init_from)
             else:
                 latest = get_latest_checkpoint(train_config.checkpoint_dir)
                 if latest:

@@ -4,6 +4,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -102,7 +103,7 @@ def main():
 
     # FineWeb2 Russian — 85%
     print("Packing FineWeb2 Russian...")
-    pack_from_hf_dataset(
+    fw_shards = pack_from_hf_dataset(
         "HuggingFaceFW/fineweb-2",
         tokenizer, shard_dir,
         text_key="text",
@@ -110,10 +111,12 @@ def main():
         shard_size=args.shard_size,
         split="train",
         config_name="rus_Cyrl",
+        shard_start_idx=0,
     )
 
-    # Wikipedia Russian — 15%
-    print("Packing Wikipedia Russian...")
+    # Wikipedia Russian — 15% (start after FineWeb shards)
+    wiki_start = len(list(Path(shard_dir).glob("train_*.bin"))) if Path(shard_dir).exists() else 0
+    print(f"Packing Wikipedia Russian (starting at shard {wiki_start})...")
     pack_from_hf_dataset(
         "wikimedia/wikipedia",
         tokenizer, shard_dir,
@@ -122,6 +125,7 @@ def main():
         shard_size=args.shard_size,
         split="train",
         config_name="20231101.ru",
+        shard_start_idx=wiki_start,
     )
 
     print(f"\nDone! Data ready at {shard_dir}")

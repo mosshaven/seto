@@ -9,8 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 
-from .checkpoint import save_checkpoint
+from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
 from .config import TrainConfig
+from .trainer import get_cosine_schedule
 
 
 class DPOTrainer:
@@ -56,6 +57,11 @@ class DPOTrainer:
         self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
+        self.scheduler = get_cosine_schedule(
+            self.optimizer, config.warmup_steps, config.max_steps,
+            config.min_lr, config.lr,
+        )
+
         from torch.utils.data import DataLoader
         sampler = None
         if local_rank >= 0 and hasattr(dataset, '__len__'):
@@ -71,8 +77,40 @@ class DPOTrainer:
         )
         self.sampler = sampler
 
+    def resume(self, checkpoint_path: str):
+        meta = load_checkpoint(
+            checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
+            self.optimizer, str(self.device)
+        )
+        self.global_step = meta.get("step", 0)
+        for _ in range(self.global_step):
+            self.scheduler.step()
+        if self.is_main:
+            print(f"Resumed DPO from step {self.global_step}")
+
+    def init_from(self, checkpoint_path: str):
+        load_checkpoint(
+            checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
+            None, str(self.device)
+        )
+        self.optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=self.config.lr,
+            betas=(self.config.beta1, self.config.beta2),
+            eps=self.config.eps,
+            weight_decay=self.config.weight_decay,
+        )
+        self.scheduler = get_cosine_schedule(
+            self.optimizer, self.config.warmup_steps, self.config.max_steps,
+            self.config.min_lr, self.config.lr,
+        )
+        self.global_step = 0
+        if self.is_main:
+            print(f"Initialized DPO from {checkpoint_path} (model weights only)")
+
     def _get_log_probs(self, model, input_ids, prompt_len):
-        """Get log probabilities for completion tokens only (after prompt)."""
+        """Get log probabilities for completion tokens only (after prompt, before EOS/pad)."""
+        B, T = input_ids.shape
         logits, _ = model(input_ids)
         # Shift: logits at t predict token at t+1
         logits = logits[:, :-1, :]
@@ -81,12 +119,16 @@ class DPOTrainer:
         log_probs = F.log_softmax(logits, dim=-1)
         token_log_probs = torch.gather(log_probs, 2, targets.unsqueeze(2)).squeeze(2)
 
-        # Mask prompt tokens (only count completion)
-        mask = torch.zeros_like(targets, dtype=torch.bool)
-        mask[:, prompt_len - 1:] = True  # prompt_len-1 because of shift
+        # Vectorized mask: completion starts at prompt_len-1 (due to shift)
+        # and ends at first EOS or padding token
+        positions = torch.arange(T - 1, device=input_ids.device).unsqueeze(0)  # [1, T-1]
+        prompt_threshold = prompt_len[:, None].to(input_ids.device) - 1  # [B, 1]
+
+        # Valid tokens: not padding (0) and not EOS (2), within completion region
+        is_valid = (targets != 0) & (targets != 2)
+        mask = (positions >= prompt_threshold) & is_valid
         token_log_probs = token_log_probs * mask.float()
 
-        # Sum over completion tokens
         return token_log_probs.sum(dim=-1)
 
     def dpo_loss(self, chosen_logps, rejected_logps):

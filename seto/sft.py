@@ -9,8 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 
-from .checkpoint import save_checkpoint, get_latest_checkpoint
+from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
 from .config import TrainConfig
+from .trainer import get_cosine_schedule
 
 
 class SFTTrainer:
@@ -47,6 +48,11 @@ class SFTTrainer:
         self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
+        self.scheduler = get_cosine_schedule(
+            self.optimizer, config.warmup_steps, config.max_steps,
+            config.min_lr, config.lr,
+        )
+
         from torch.utils.data import DataLoader
         sampler = None
         if local_rank >= 0 and hasattr(dataset, '__len__'):
@@ -68,10 +74,32 @@ class SFTTrainer:
             self.optimizer, str(self.device)
         )
         self.global_step = meta.get("step", 0)
+        # Restore scheduler position
         for _ in range(self.global_step):
             self.scheduler.step()
         if self.is_main:
-            print(f"Resumed from step {self.global_step}")
+            print(f"Resumed SFT from step {self.global_step}")
+
+    def init_from(self, checkpoint_path: str):
+        load_checkpoint(
+            checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
+            None, str(self.device)
+        )
+        # Reset optimizer + scheduler for new stage
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.lr,
+            betas=(self.config.beta1, self.config.beta2),
+            eps=self.config.eps,
+            weight_decay=self.config.weight_decay,
+        )
+        self.scheduler = get_cosine_schedule(
+            self.optimizer, self.config.warmup_steps, self.config.max_steps,
+            self.config.min_lr, self.config.lr,
+        )
+        self.global_step = 0
+        if self.is_main:
+            print(f"Initialized SFT from {checkpoint_path} (model weights only)")
 
     def train(self):
         if self.is_main:

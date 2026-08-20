@@ -17,7 +17,7 @@ class ModelConfig:
     tie_embeddings: bool = True
     rope_theta: float = 10000.0
     norm_eps: float = 1e-6
-    use_gradient_checkpointing: bool = False
+    use_gradient_checkpointing: bool = True
 
     @property
     def head_dim(self) -> int:
@@ -108,6 +108,7 @@ class TrainConfig:
     # DPO config
     dpo_data: str = ""
     dpo_beta: float = 0.1
+    dpo_max_samples: int = 100000
 
     # DDP
     local_rank: int = -1

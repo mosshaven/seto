@@ -100,15 +100,18 @@ class SetoTokenizer:
     def decode(self, ids: List[int], skip_special_tokens: bool = True) -> str:
         return self._tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
 
-    def apply_chat_template(self, messages: List[dict]) -> str:
+    def apply_chat_template(self, messages: List[dict], add_generation_prompt: bool = True) -> str:
         parts = []
         for msg in messages:
             role = msg["role"]
             content = msg["content"]
             token = self.special_tokens.get(role, f"<|{role}|>")
             parts.append(f"{token}\n{content}")
-        parts.append(self.special_tokens["assistant"] + "\n")
-        text = SPECIAL_TOKENS["bos"] + "".join(parts) + SPECIAL_TOKENS["eos"]
+        if add_generation_prompt:
+            parts.append(self.special_tokens["assistant"] + "\n")
+        text = SPECIAL_TOKENS["bos"] + "".join(parts)
+        if not add_generation_prompt:
+            text += SPECIAL_TOKENS["eos"]
         return text
 
     def __len__(self) -> int:

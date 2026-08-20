@@ -2,9 +2,11 @@
 
 import math
 import os
+import random
 import time
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -29,12 +31,12 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def get_cosine_schedule(optimizer, warmup_steps: int, max_steps: int, min_lr: float):
+def get_cosine_schedule(optimizer, warmup_steps: int, max_steps: int, min_lr: float, base_lr: float):
     def lr_lambda(step):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-        return min_lr / 3e-4 + 0.5 * (1.0 - min_lr / 3e-4) * (1.0 + math.cos(math.pi * progress))
+        return min_lr / base_lr + 0.5 * (1.0 - min_lr / base_lr) * (1.0 + math.cos(math.pi * progress))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
@@ -68,12 +70,13 @@ class SetoTrainer:
 
         # FP16 for T4 (Turing) — bf16 not supported on T4
         use_amp = (self.config.use_fp16 or self.config.use_bf16) and self.device.type == "cuda"
-        dtype = torch.bfloat16 if self.config.use_bf16 else torch.float16
-        self.scaler = GradScaler(enabled=use_amp and not self.config.use_bf16)
-        self.amp_dtype = dtype if use_amp else None
+        self.use_amp = use_amp
+        self.amp_dtype = torch.bfloat16 if self.config.use_bf16 else torch.float16
+        self.scaler = GradScaler(enabled=use_amp and self.config.use_fp16)
 
         self.scheduler = get_cosine_schedule(
-            self.optimizer, self.config.warmup_steps, self.config.max_steps, self.config.min_lr
+            self.optimizer, self.config.warmup_steps, self.config.max_steps,
+            self.config.min_lr, self.config.lr
         )
 
         self.train_dataset = train_dataset
@@ -112,17 +115,53 @@ class SetoTrainer:
         else:
             self.val_loader = None
 
-    def resume(self, checkpoint_path: str):
+    def _load_state(self, checkpoint_path: str, load_optimizer: bool = True):
+        """Load full checkpoint state."""
         meta = load_checkpoint(
             checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
-            self.optimizer, str(self.device)
+            self.optimizer if load_optimizer else None, str(self.device)
         )
         self.global_step = meta.get("step", 0)
         self.tokens_seen = meta.get("tokens_seen", 0)
+
+        # Restore scheduler
         for _ in range(self.global_step):
             self.scheduler.step()
+
+        # Restore RNG state
+        if "rng" in meta:
+            rng = meta["rng"]
+            random.setstate(rng.get("python"))
+            np.random.set_state(rng.get("numpy"))
+            if "cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state(rng["cuda"])
+
         if self.is_main:
-            print(f"Resumed from step {self.global_step} ({self.tokens_seen:,} tokens)")
+            print(f"Loaded from step {self.global_step} ({self.tokens_seen:,} tokens)")
+
+    def resume(self, checkpoint_path: str):
+        """Resume training from checkpoint (model + optimizer + scheduler + RNG)."""
+        self._load_state(checkpoint_path, load_optimizer=True)
+
+    def init_from(self, checkpoint_path: str):
+        """Load model weights only (for stage chaining: pretrain→cooldown→sft)."""
+        self._load_state(checkpoint_path, load_optimizer=False)
+        # Reset optimizer for new stage
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.lr,
+            betas=(self.config.beta1, self.config.beta2),
+            eps=self.config.eps,
+            weight_decay=self.config.weight_decay,
+        )
+        self.scheduler = get_cosine_schedule(
+            self.optimizer, self.config.warmup_steps, self.config.max_steps,
+            self.config.min_lr, self.config.lr
+        )
+        self.global_step = 0
+        self.tokens_seen = 0
+        if self.is_main:
+            print(f"Initialized from {checkpoint_path} (model weights only)")
 
     def train(self):
         if self.is_main:
@@ -131,7 +170,7 @@ class SetoTrainer:
             print(f"Model params: {m.count_parameters():,}")
             print(f"Effective batch size: {self.config.effective_batch_size}")
             print(f"Tokens per step: ~{self.config.tokens_per_step:,}")
-            print(f"FP16: {self.config.use_fp16} | Grad checkpoint: {self.config.use_gradient_checkpointing}")
+            print(f"FP16: {self.config.use_fp16}")
 
         self.model.train()
         running_loss = 0.0
@@ -148,12 +187,11 @@ class SetoTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                use_amp = self.amp_dtype is not None
-                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=use_amp):
+                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                     _, loss = self.model(input_ids, targets=labels)
                     loss = loss / self.config.grad_accum_steps
 
-                if self.config.use_fp16 and not self.config.use_bf16:
+                if self.config.use_fp16:
                     self.scaler.scale(loss).backward()
                 else:
                     loss.backward()
@@ -161,14 +199,14 @@ class SetoTrainer:
                 running_loss += loss.item()
 
                 if (batch_idx + 1) % self.config.grad_accum_steps == 0:
-                    if self.config.use_fp16 and not self.config.use_bf16:
+                    if self.config.use_fp16:
                         self.scaler.unscale_(self.optimizer)
 
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.config.max_grad_norm
                     )
 
-                    if self.config.use_fp16 and not self.config.use_bf16:
+                    if self.config.use_fp16:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                     else:
@@ -214,8 +252,7 @@ class SetoTrainer:
         for batch in self.val_loader:
             input_ids = batch["input_ids"].to(self.device, non_blocking=True)
             labels = batch["labels"].to(self.device, non_blocking=True)
-            use_amp = self.amp_dtype is not None
-            with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=use_amp):
+            with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                 _, loss = self.model(input_ids, targets=labels)
             total_loss += loss.item()
             n_batches += 1
@@ -223,31 +260,45 @@ class SetoTrainer:
         return total_loss / max(1, n_batches)
 
     def _save_checkpoint(self, loss: float, is_best: bool = False):
+        # Save RNG state
+        rng_state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+        }
+        if torch.cuda.is_available():
+            rng_state["cuda"] = torch.cuda.get_rng_state()
+
         config_dict = {
             "stage": self.config.stage,
-            "global_step": self.global_step,
             "tokens_seen": self.tokens_seen,
             "best_val_loss": self.best_val_loss,
         }
+
         save_checkpoint(
             model=self.model.module if hasattr(self.model, "module") else self.model,
             optimizer=self.optimizer,
+            scheduler=self.scheduler,
             step=self.global_step,
             loss=loss,
             config=config_dict,
             save_dir=self.config.checkpoint_dir,
             zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
+            rng_state=rng_state,
+            tokens_seen=self.tokens_seen,
         )
         if is_best:
             best_dir = os.path.join(self.config.checkpoint_dir, "best")
             save_checkpoint(
                 model=self.model.module if hasattr(self.model, "module") else self.model,
                 optimizer=self.optimizer,
+                scheduler=self.scheduler,
                 step=self.global_step,
                 loss=loss,
                 config=config_dict,
                 save_dir=best_dir,
                 zip_it=True,
                 keep_last_n=1,
+                rng_state=rng_state,
+                tokens_seen=self.tokens_seen,
             )

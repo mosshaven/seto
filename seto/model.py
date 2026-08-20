@@ -1,4 +1,4 @@
-"""Seto-1B: Decoder-only Transformer with GQA, SwiGLu, RoPE, RMSNorm, SDPA."""
+"""Seto-1B: Decoder-only Transformer with GQA, SwiGLU, RoPE, RMSNorm, SDPA."""
 
 import math
 from typing import Optional, Tuple
@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 from .config import ModelConfig
 
@@ -64,7 +65,6 @@ class GroupedQueryAttention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
@@ -78,13 +78,10 @@ class GroupedQueryAttention(nn.Module):
         k = self.repeat_kv(k)
         v = self.repeat_kv(v)
 
-        # Use PyTorch SDPA — auto-selects best backend (FlashAttention, memory-efficient, math)
-        # Works on T4 (Turing) without manual FlashAttention install
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=mask[:, :, :T, :T] if mask is not None else None,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
-            is_causal=(mask is None),
+            is_causal=True,
         )
 
         out = attn_output.transpose(1, 2).contiguous().view(B, T, -1)
@@ -115,9 +112,8 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x), freqs_cis, mask)
+        x = x + self.attention(self.attention_norm(x), freqs_cis)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -139,9 +135,6 @@ class SetoLM(nn.Module):
 
         freqs_cis = precompute_freqs_cis(config.head_dim, config.max_seq_len * 2, config.rope_theta)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
-
-        # No explicit causal mask needed — SDPA handles is_causal=True
-        self.register_buffer("mask", torch.empty(0), persistent=False)
 
         self.apply(self._init_weights)
 
@@ -165,7 +158,10 @@ class SetoLM(nn.Module):
         freqs_cis = self.freqs_cis[:T]
 
         for layer in self.layers:
-            x = layer(x, freqs_cis)
+            if self.config.use_gradient_checkpointing and self.training:
+                x = gradient_checkpoint(layer, x, freqs_cis, use_reentrant=False)
+            else:
+                x = layer(x, freqs_cis)
 
         x = self.norm(x)
         logits = self.output(x)

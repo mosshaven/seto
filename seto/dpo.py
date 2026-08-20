@@ -51,17 +51,19 @@ class DPOTrainer:
             weight_decay=config.weight_decay,
         )
 
-        self.scaler = GradScaler(enabled=config.use_bf16 and self.device.type == "cuda")
+        self.use_amp = (config.use_fp16 or config.use_bf16) and self.device.type == "cuda"
+        self.amp_dtype = torch.bfloat16 if config.use_bf16 else torch.float16
+        self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
         from torch.utils.data import DataLoader
         sampler = None
-        if local_rank >= 0:
+        if local_rank >= 0 and hasattr(dataset, '__len__'):
             sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         self.data_loader = DataLoader(
             dataset,
             batch_size=config.batch_size,
-            shuffle=(sampler is None),
+            shuffle=(sampler is None and hasattr(dataset, '__len__')),
             num_workers=config.num_workers,
             pin_memory=True,
             drop_last=True,
@@ -69,10 +71,22 @@ class DPOTrainer:
         )
         self.sampler = sampler
 
-    def _get_log_probs(self, model, input_ids, labels):
+    def _get_log_probs(self, model, input_ids, prompt_len):
+        """Get log probabilities for completion tokens only (after prompt)."""
         logits, _ = model(input_ids)
+        # Shift: logits at t predict token at t+1
+        logits = logits[:, :-1, :]
+        targets = input_ids[:, 1:]
+
         log_probs = F.log_softmax(logits, dim=-1)
-        token_log_probs = torch.gather(log_probs, 2, labels.unsqueeze(2)).squeeze(2)
+        token_log_probs = torch.gather(log_probs, 2, targets.unsqueeze(2)).squeeze(2)
+
+        # Mask prompt tokens (only count completion)
+        mask = torch.zeros_like(targets, dtype=torch.bool)
+        mask[:, prompt_len - 1:] = True  # prompt_len-1 because of shift
+        token_log_probs = token_log_probs * mask.float()
+
+        # Sum over completion tokens
         return token_log_probs.sum(dim=-1)
 
     def dpo_loss(self, chosen_logps, rejected_logps):
@@ -100,15 +114,15 @@ class DPOTrainer:
 
                 chosen_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 rejected_ids = batch["rejected_ids"].to(self.device, non_blocking=True)
+                prompt_len = batch["prompt_len"]
 
-                use_amp = self.config.use_bf16 and self.device.type == "cuda"
-                with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-                    chosen_logps = self._get_log_probs(self.model, chosen_ids, chosen_ids)
-                    rejected_logps = self._get_log_probs(self.model, rejected_ids, rejected_ids)
+                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                    chosen_logps = self._get_log_probs(self.model, chosen_ids, prompt_len)
+                    rejected_logps = self._get_log_probs(self.model, rejected_ids, prompt_len)
 
                     with torch.no_grad():
-                        ref_chosen_logps = self._get_log_probs(self.ref_model, chosen_ids, chosen_ids)
-                        ref_rejected_logps = self._get_log_probs(self.ref_model, rejected_ids, rejected_ids)
+                        ref_chosen_logps = self._get_log_probs(self.ref_model, chosen_ids, prompt_len)
+                        ref_rejected_logps = self._get_log_probs(self.ref_model, rejected_ids, prompt_len)
 
                     chosen_logps = chosen_logps - ref_chosen_logps
                     rejected_logps = rejected_logps - ref_rejected_logps
@@ -116,14 +130,22 @@ class DPOTrainer:
                     loss, accuracy, margin = self.dpo_loss(chosen_logps, rejected_logps)
                     loss = loss / self.config.grad_accum_steps
 
-                self.scaler.scale(loss).backward()
+                if self.config.use_fp16:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 running_loss += loss.item()
 
                 if (batch_idx + 1) % self.config.grad_accum_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
+                    if self.config.use_fp16:
+                        self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    if self.config.use_fp16:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
 
@@ -151,4 +173,5 @@ class DPOTrainer:
             save_dir=self.config.checkpoint_dir,
             zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
+            tokens_seen=self.global_step * self.config.tokens_per_step,
         )

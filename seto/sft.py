@@ -42,17 +42,19 @@ class SFTTrainer:
             weight_decay=config.weight_decay,
         )
 
-        self.scaler = GradScaler(enabled=config.use_bf16 and self.device.type == "cuda")
+        self.use_amp = (config.use_fp16 or config.use_bf16) and self.device.type == "cuda"
+        self.amp_dtype = torch.bfloat16 if config.use_bf16 else torch.float16
+        self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
         from torch.utils.data import DataLoader
         sampler = None
-        if local_rank >= 0:
+        if local_rank >= 0 and hasattr(dataset, '__len__'):
             sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         self.data_loader = DataLoader(
             dataset,
             batch_size=config.batch_size,
-            shuffle=(sampler is None),
+            shuffle=(sampler is None and hasattr(dataset, '__len__')),
             num_workers=config.num_workers,
             pin_memory=True,
             drop_last=True,
@@ -60,10 +62,22 @@ class SFTTrainer:
         )
         self.sampler = sampler
 
+    def resume(self, checkpoint_path: str):
+        meta = load_checkpoint(
+            checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
+            self.optimizer, str(self.device)
+        )
+        self.global_step = meta.get("step", 0)
+        for _ in range(self.global_step):
+            self.scheduler.step()
+        if self.is_main:
+            print(f"Resumed from step {self.global_step}")
+
     def train(self):
         if self.is_main:
             print(f"SFT Training | Steps: {self.config.max_steps} | LR: {self.config.lr}")
-            print(f"Model params: {(self.model.module if hasattr(self.model, 'module') else self.model).count_parameters():,}")
+            m = self.model.module if hasattr(self.model, "module") else self.model
+            print(f"Model params: {m.count_parameters():,}")
 
         self.model.train()
         running_loss = 0.0
@@ -80,8 +94,7 @@ class SFTTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                use_amp = self.config.use_bf16 and self.device.type == "cuda"
-                with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                     logits, _ = self.model(input_ids)
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
@@ -89,14 +102,22 @@ class SFTTrainer:
                         ignore_index=-100,
                     ) / self.config.grad_accum_steps
 
-                self.scaler.scale(loss).backward()
+                if self.config.use_fp16:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 running_loss += loss.item()
 
                 if (batch_idx + 1) % self.config.grad_accum_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
+                    if self.config.use_fp16:
+                        self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    if self.config.use_fp16:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
 
@@ -120,4 +141,5 @@ class SFTTrainer:
             save_dir=self.config.checkpoint_dir,
             zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
+            tokens_seen=self.global_step * self.config.tokens_per_step,
         )

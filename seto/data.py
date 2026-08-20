@@ -1,9 +1,9 @@
-"""Seto data — uint16 binary shards for fast training."""
+"""Seto data — uint16 binary shards, SFT dataset, DPO dataset."""
 
+import json
 import os
-import struct
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -21,15 +21,15 @@ class ShardDataset(Dataset):
         if not shard_files:
             shard_files = sorted(self.data_dir.glob("*.bin"))
 
+        # Memory-map instead of loading into RAM
         self.data = np.concatenate([
-            np.fromfile(str(f), dtype=np.uint16) for f in shard_files
+            np.memmap(str(f), dtype=np.uint16, mode='r') for f in shard_files
         ])
 
         self.n_tokens = len(self.data)
         self.n_sequences = self.n_tokens // (seq_len + 1)
 
         print(f"Loaded {self.n_tokens:,} tokens from {len(shard_files)} shards")
-        print(f"  {self.n_sequences:,} sequences of length {seq_len}")
 
     def __len__(self) -> int:
         return max(1, self.n_sequences - 1)
@@ -48,33 +48,170 @@ class ShardDataset(Dataset):
         return {"input_ids": input_ids, "labels": labels}
 
 
-class StreamingShardDataset(IterableDataset):
-    """Streaming from uint16 shards — for large datasets."""
+class SFTDataset(Dataset):
+    """SFT dataset with chat template. Loss only on assistant turns."""
 
-    def __init__(self, data_dir: str, seq_len: int = 1024):
+    def __init__(self, data_dir: str, seq_len: int = 1024, tokenizer=None, max_samples: int = 100000):
         self.seq_len = seq_len
-        self.data_dir = Path(data_dir)
+        self.tokenizer = tokenizer
+        self.data = []
 
-    def __iter__(self):
-        shard_files = sorted(self.data_dir.glob("*.bin"))
-        for shard_file in shard_files:
-            data = np.fromfile(str(shard_file), dtype=np.uint16)
-            n_seqs = len(data) // (self.seq_len + 1)
+        data_path = Path(data_dir)
+        files = list(data_path.rglob("*.jsonl")) + list(data_path.rglob("*.json"))
 
-            for i in range(n_seqs):
-                start = i * (self.seq_len + 1)
-                chunk = data[start:start + self.seq_len + 1]
+        for f in files:
+            try:
+                if f.suffix == ".jsonl":
+                    with open(f) as fh:
+                        for line in fh:
+                            try:
+                                obj = json.loads(line)
+                                messages = obj.get("messages", obj.get("conversations", []))
+                                if messages:
+                                    self.data.append(messages)
+                            except json.JSONDecodeError:
+                                continue
+                elif f.suffix == ".json":
+                    with open(f) as fh:
+                        obj = json.load(fh)
+                        if isinstance(obj, list):
+                            for item in obj:
+                                messages = item.get("messages", item.get("conversations", []))
+                                if messages:
+                                    self.data.append(messages)
+            except Exception:
+                continue
 
-                input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
-                labels = torch.tensor(chunk[1:], dtype=torch.long)
+            if len(self.data) >= max_samples:
+                break
 
-                yield {"input_ids": input_ids, "labels": labels}
+        print(f"Loaded {len(self.data)} SFT samples from {data_dir}")
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict:
+        messages = self.data[idx]
+
+        if self.tokenizer:
+            # Build full conversation with chat template
+            full_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=False)
+            full_ids = self.tokenizer.encode(full_text, add_bos=True, add_eos=True)
+
+            # Build prompt part (everything before assistant's last response)
+            # to mask labels for non-assistant tokens
+            prompt_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            prompt_ids = self.tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+            prompt_len = len(prompt_ids)
+        else:
+            full_ids = []
+            prompt_len = 0
+            for msg in messages:
+                content = msg.get("content", "")
+                if msg.get("role") == "assistant":
+                    for ch in content:
+                        full_ids.append(ord(ch) % 48000)
+                else:
+                    for ch in content:
+                        full_ids.append(ord(ch) % 48000)
+                    prompt_len = len(full_ids)
+
+        # Pad/truncate
+        if len(full_ids) < self.seq_len:
+            full_ids = full_ids + [0] * (self.seq_len - len(full_ids))
+        else:
+            full_ids = full_ids[:self.seq_len]
+
+        input_ids = torch.tensor(full_ids, dtype=torch.long)
+        labels = input_ids.clone()
+
+        # Mask prompt tokens (only train on assistant response)
+        if prompt_len > 0:
+            labels[:min(prompt_len, self.seq_len)] = -100
+
+        # Mask padding
+        labels[input_ids == 0] = -100
+
+        return {"input_ids": input_ids, "labels": labels}
+
+
+class DPODataset(Dataset):
+    """DPO preference dataset with chosen/rejected pairs."""
+
+    def __init__(self, data_dir: str, seq_len: int = 1024, tokenizer=None, max_samples: int = 100000):
+        self.seq_len = seq_len
+        self.tokenizer = tokenizer
+        self.data = []
+
+        data_path = Path(data_dir)
+        files = list(data_path.rglob("*.jsonl")) + list(data_path.rglob("*.json"))
+
+        for f in files:
+            try:
+                if f.suffix == ".jsonl":
+                    with open(f) as fh:
+                        for line in fh:
+                            try:
+                                obj = json.loads(line)
+                                if "chosen" in obj and "rejected" in obj:
+                                    self.data.append(obj)
+                            except json.JSONDecodeError:
+                                continue
+                elif f.suffix == ".json":
+                    with open(f) as fh:
+                        obj = json.load(fh)
+                        if isinstance(obj, list):
+                            for item in obj:
+                                if "chosen" in item and "rejected" in item:
+                                    self.data.append(item)
+            except Exception:
+                continue
+
+            if len(self.data) >= max_samples:
+                break
+
+        print(f"Loaded {len(self.data)} DPO pairs from {data_dir}")
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict:
+        pair = self.data[idx]
+        prompt = pair.get("prompt", "")
+        chosen = pair.get("chosen", "")
+        rejected = pair.get("rejected", "")
+
+        if self.tokenizer:
+            prompt_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+            chosen_ids = self.tokenizer.encode(chosen, add_bos=False, add_eos=True)
+            rejected_ids = self.tokenizer.encode(rejected, add_bos=False, add_eos=True)
+        else:
+            prompt_ids = [ord(c) % 48000 for c in prompt]
+            chosen_ids = [ord(c) % 48000 for c in chosen] + [2]
+            rejected_ids = [ord(c) % 48000 for c in rejected] + [2]
+
+        max_prompt = self.seq_len // 3
+        prompt_ids = prompt_ids[:max_prompt]
+        chosen_ids = (prompt_ids + chosen_ids)[:self.seq_len]
+        rejected_ids = (prompt_ids + rejected_ids)[:self.seq_len]
+
+        prompt_len = len(prompt_ids)
+
+        # Pad
+        chosen_ids = chosen_ids + [0] * (self.seq_len - len(chosen_ids))
+        rejected_ids = rejected_ids + [0] * (self.seq_len - len(rejected_ids))
+
+        return {
+            "input_ids": torch.tensor(chosen_ids, dtype=torch.long),
+            "rejected_ids": torch.tensor(rejected_ids, dtype=torch.long),
+            "prompt_len": prompt_len,
+        }
 
 
 def pack_tokens_to_shards(
     token_ids: List[int],
     output_dir: str,
-    shard_size: int = 100_000_000,  # 100M tokens per shard
+    shard_size: int = 100_000_000,
     split: str = "train",
 ):
     """Pack token IDs into uint16 binary shards."""
@@ -102,19 +239,42 @@ def pack_from_text_files(
     shard_size: int = 100_000_000,
     split: str = "train",
 ):
-    """Read text files, tokenize, and pack into shards."""
-    all_tokens = []
+    """Read text files, tokenize, and pack into shards. Incremental — low RAM."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    buffer = []
+    shard_idx = 0
+    total_tokens = 0
 
     for f in text_files:
         try:
             with open(f, "r", encoding="utf-8", errors="ignore") as fh:
                 text = fh.read()
             ids = tokenizer.encode(text, add_bos=True, add_eos=True)
-            all_tokens.extend(ids)
+            buffer.extend(ids)
+
+            # Write shard when buffer is full
+            while len(buffer) >= shard_size:
+                shard = np.array(buffer[:shard_size], dtype=np.uint16)
+                shard_path = os.path.join(output_dir, f"{split}_{shard_idx:04d}.bin")
+                shard.tofile(shard_path)
+                print(f"  Shard {shard_idx}: {shard_size:,} tokens -> {shard_path}")
+                buffer = buffer[shard_size:]
+                shard_idx += 1
+                total_tokens += shard_size
+
         except Exception as e:
             print(f"  Warning: failed to process {f}: {e}")
 
-    pack_tokens_to_shards(all_tokens, output_dir, shard_size, split)
+    # Write remaining buffer
+    if buffer:
+        shard = np.array(buffer, dtype=np.uint16)
+        shard_path = os.path.join(output_dir, f"{split}_{shard_idx:04d}.bin")
+        shard.tofile(shard_path)
+        total_tokens += len(buffer)
+        print(f"  Shard {shard_idx}: {len(buffer):,} tokens -> {shard_path}")
+
+    print(f"Packed {total_tokens:,} tokens total")
 
 
 def pack_from_hf_dataset(
@@ -125,30 +285,54 @@ def pack_from_hf_dataset(
     max_samples: Optional[int] = None,
     shard_size: int = 100_000_000,
     split: str = "train",
+    config_name: Optional[str] = None,
 ):
-    """Load HuggingFace dataset, tokenize, and pack into shards."""
+    """Load HuggingFace dataset, tokenize, and pack into shards. Incremental."""
     from datasets import load_dataset
 
-    ds = load_dataset(dataset_name, split=split, streaming=True)
+    ds = load_dataset(dataset_name, name=config_name, split=split, streaming=True)
 
-    all_tokens = []
-    for i, row in enumerate(ds):
-        if max_samples and i >= max_samples:
+    os.makedirs(output_dir, exist_ok=True)
+    buffer = []
+    shard_idx = 0
+    total_tokens = 0
+    count = 0
+
+    for row in ds:
+        if max_samples and count >= max_samples:
             break
 
         text = row.get(text_key, "")
-        if text:
+        if text and len(text) > 100:
             ids = tokenizer.encode(text, add_bos=True, add_eos=True)
-            all_tokens.extend(ids)
+            buffer.extend(ids)
+            count += 1
 
-        if i % 10000 == 0 and i > 0:
-            print(f"  Tokenized {i:,} samples...")
+        # Write shard when buffer is full
+        while len(buffer) >= shard_size:
+            shard = np.array(buffer[:shard_size], dtype=np.uint16)
+            shard_path = os.path.join(output_dir, f"{split}_{shard_idx:04d}.bin")
+            shard.tofile(shard_path)
+            print(f"  Shard {shard_idx}: {shard_size:,} tokens -> {shard_path}")
+            buffer = buffer[shard_size:]
+            shard_idx += 1
+            total_tokens += shard_size
 
-    pack_tokens_to_shards(all_tokens, output_dir, shard_size, split)
+        if count % 10000 == 0 and count > 0:
+            print(f"  Tokenized {count:,} samples, {total_tokens + len(buffer):,} tokens...")
+
+    # Write remaining
+    if buffer:
+        shard = np.array(buffer, dtype=np.uint16)
+        shard_path = os.path.join(output_dir, f"{split}_{shard_idx:04d}.bin")
+        shard.tofile(shard_path)
+        total_tokens += len(buffer)
+        print(f"  Shard {shard_idx}: {len(buffer):,} tokens -> {shard_path}")
+
+    print(f"Packed {total_tokens:,} tokens from {count:,} samples")
 
 
 def find_shards(data_dir: str, split: str = "train") -> List[str]:
-    """Find all shard files in a directory."""
     data_path = Path(data_dir)
     shards = sorted(data_path.glob(f"{split}_*.bin"))
     if not shards:

@@ -1,10 +1,10 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "seto"
-version = "0.1.0"
+version = "0.3.4"
 description = "Tiny language model for mobile deployment"
 readme = "README.md"
 license = {text = "MIT"}

@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
 
 from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
 from .config import TrainConfig
@@ -45,7 +44,7 @@ class SFTTrainer:
 
         self.use_amp = (config.use_fp16 or config.use_bf16) and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if config.use_bf16 else torch.float16
-        self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
         self.scheduler = get_cosine_schedule(
@@ -69,6 +68,8 @@ class SFTTrainer:
         self.sampler = sampler
 
     def resume(self, checkpoint_path: str):
+        import random
+        import numpy as np
         meta = load_checkpoint(
             checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
             self.optimizer, str(self.device)
@@ -77,6 +78,15 @@ class SFTTrainer:
         # Restore scheduler position
         for _ in range(self.global_step):
             self.scheduler.step()
+        # Restore RNG
+        if "rng" in meta:
+            rng = meta["rng"]
+            if "python" in rng:
+                random.setstate(rng["python"])
+            if "numpy" in rng:
+                np.random.set_state(rng["numpy"])
+            if "cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state(rng["cuda"])
         if self.is_main:
             print(f"Resumed SFT from step {self.global_step}")
 
@@ -122,7 +132,7 @@ class SFTTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                     logits, _ = self.model(input_ids)
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
@@ -147,6 +157,7 @@ class SFTTrainer:
                     else:
                         self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
+                    self.scheduler.step()
                     self.global_step += 1
 
                     if self.is_main and self.global_step % self.config.log_every == 0:
@@ -160,14 +171,21 @@ class SFTTrainer:
                         self._save()
 
     def _save(self):
+        import random
+        import numpy as np
+        rng_state = {"python": random.getstate(), "numpy": np.random.get_state()}
+        if torch.cuda.is_available():
+            rng_state["cuda"] = torch.cuda.get_rng_state()
         save_checkpoint(
             model=self.model.module if hasattr(self.model, "module") else self.model,
             optimizer=self.optimizer,
+            scheduler=self.scheduler,
             step=self.global_step,
             loss=0.0,
             config={"stage": "sft", "step": self.global_step},
             save_dir=self.config.checkpoint_dir,
             zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
+            rng_state=rng_state,
             tokens_seen=self.global_step * self.config.tokens_per_step,
         )

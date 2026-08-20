@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
@@ -72,7 +71,7 @@ class SetoTrainer:
         use_amp = (self.config.use_fp16 or self.config.use_bf16) and self.device.type == "cuda"
         self.use_amp = use_amp
         self.amp_dtype = torch.bfloat16 if self.config.use_bf16 else torch.float16
-        self.scaler = GradScaler(enabled=use_amp and self.config.use_fp16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and self.config.use_fp16)
 
         self.scheduler = get_cosine_schedule(
             self.optimizer, self.config.warmup_steps, self.config.max_steps,
@@ -187,7 +186,7 @@ class SetoTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                     _, loss = self.model(input_ids, targets=labels)
                     loss = loss / self.config.grad_accum_steps
 
@@ -252,7 +251,7 @@ class SetoTrainer:
         for batch in self.val_loader:
             input_ids = batch["input_ids"].to(self.device, non_blocking=True)
             labels = batch["labels"].to(self.device, non_blocking=True)
-            with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+            with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                 _, loss = self.model(input_ids, targets=labels)
             total_loss += loss.item()
             n_batches += 1

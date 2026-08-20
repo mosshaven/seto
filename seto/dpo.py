@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
 
 from .checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
 from .config import TrainConfig
@@ -54,7 +53,7 @@ class DPOTrainer:
 
         self.use_amp = (config.use_fp16 or config.use_bf16) and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if config.use_bf16 else torch.float16
-        self.scaler = GradScaler(enabled=self.use_amp and config.use_fp16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and config.use_fp16)
         self.global_step = 0
 
         self.scheduler = get_cosine_schedule(
@@ -78,6 +77,8 @@ class DPOTrainer:
         self.sampler = sampler
 
     def resume(self, checkpoint_path: str):
+        import random
+        import numpy as np
         meta = load_checkpoint(
             checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
             self.optimizer, str(self.device)
@@ -85,6 +86,30 @@ class DPOTrainer:
         self.global_step = meta.get("step", 0)
         for _ in range(self.global_step):
             self.scheduler.step()
+        # Restore RNG
+        if "rng" in meta:
+            rng = meta["rng"]
+            if "python" in rng:
+                random.setstate(rng["python"])
+            if "numpy" in rng:
+                np.random.set_state(rng["numpy"])
+            if "cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state(rng["cuda"])
+        # Load ref_model from same checkpoint dir
+        ref_path = os.path.join(os.path.dirname(checkpoint_path), "ref_model.pt")
+        if not os.path.exists(ref_path):
+            # Try inside zip or adjacent
+            ref_path_zipped = checkpoint_path.replace(".zip", "_ref.pt")
+            if os.path.exists(ref_path_zipped):
+                ref_path = ref_path_zipped
+        if os.path.exists(ref_path):
+            ref_state = torch.load(ref_path, map_location=str(self.device), weights_only=True)
+            raw = self.ref_model.module if hasattr(self.ref_model, "module") else self.ref_model
+            raw.load_state_dict(ref_state)
+            if self.is_main:
+                print(f"Loaded ref_model from {ref_path}")
+        elif self.is_main:
+            print(f"WARNING: ref_model.pt not found near {checkpoint_path}, ref unchanged")
         if self.is_main:
             print(f"Resumed DPO from step {self.global_step}")
 
@@ -158,7 +183,7 @@ class DPOTrainer:
                 rejected_ids = batch["rejected_ids"].to(self.device, non_blocking=True)
                 prompt_len = batch["prompt_len"]
 
-                with autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                     chosen_logps = self._get_log_probs(self.model, chosen_ids, prompt_len)
                     rejected_logps = self._get_log_probs(self.model, rejected_ids, prompt_len)
 
@@ -189,6 +214,7 @@ class DPOTrainer:
                     else:
                         self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
+                    self.scheduler.step()
                     self.global_step += 1
 
                     if self.is_main and self.global_step % self.config.log_every == 0:
@@ -206,14 +232,25 @@ class DPOTrainer:
                         self._save()
 
     def _save(self):
+        import random
+        import numpy as np
+        rng_state = {"python": random.getstate(), "numpy": np.random.get_state()}
+        if torch.cuda.is_available():
+            rng_state["cuda"] = torch.cuda.get_rng_state()
         save_checkpoint(
             model=self.model.module if hasattr(self.model, "module") else self.model,
             optimizer=self.optimizer,
+            scheduler=self.scheduler,
             step=self.global_step,
             loss=0.0,
             config={"stage": "dpo", "step": self.global_step, "beta": self.beta},
             save_dir=self.config.checkpoint_dir,
             zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
+            rng_state=rng_state,
             tokens_seen=self.global_step * self.config.tokens_per_step,
         )
+        # Save ref_model alongside checkpoint
+        ref_model_raw = self.ref_model.module if hasattr(self.ref_model, "module") else self.ref_model
+        ref_path = os.path.join(self.config.checkpoint_dir, "ref_model.pt")
+        torch.save(ref_model_raw.state_dict(), ref_path)

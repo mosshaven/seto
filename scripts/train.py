@@ -33,6 +33,7 @@ def parse_args():
     p.add_argument("--local-rank", type=int, default=-1)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--grad-accum", type=int, default=None)
+    p.add_argument("--seq-len", type=int, default=None, help="Override model max_seq_len")
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--fp16", action="store_true", default=True)
@@ -71,6 +72,8 @@ def main():
 
         # Sync max_seq_len from model config
         train_config.max_seq_len = model_config.max_seq_len
+        if args.seq_len:
+            train_config.max_seq_len = args.seq_len
 
         if args.batch_size:
             train_config.batch_size = args.batch_size

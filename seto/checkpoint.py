@@ -21,6 +21,7 @@ def save_checkpoint(
     zip_it: bool = True,
     keep_last_n: int = 3,
     scheduler=None,
+    scaler=None,
     rng_state: Optional[dict] = None,
     tokens_seen: int = 0,
 ) -> str:
@@ -43,6 +44,10 @@ def save_checkpoint(
     # Save scheduler
     if scheduler is not None:
         torch.save(scheduler.state_dict(), ckpt_dir / "scheduler.pt")
+
+    # Save GradScaler
+    if scaler is not None and hasattr(scaler, "state_dict"):
+        torch.save(scaler.state_dict(), ckpt_dir / "scaler.pt")
 
     # Save RNG state
     if rng_state is not None:
@@ -117,6 +122,10 @@ def load_checkpoint(
     # Load scheduler state (caller must restore separately)
     if (path / "scheduler.pt").exists():
         meta["scheduler"] = torch.load(path / "scheduler.pt", map_location=device, weights_only=True)
+
+    # Load GradScaler state
+    if (path / "scaler.pt").exists():
+        meta["scaler"] = torch.load(path / "scaler.pt", map_location=device, weights_only=True)
 
     # Load RNG state
     if (path / "rng.pt").exists():

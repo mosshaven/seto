@@ -52,7 +52,12 @@ class SetoTrainer:
         self.local_rank = local_rank
         self.is_main = local_rank in [-1, 0]
 
-        self.device = torch.device(f"cuda:{local_rank}" if local_rank >= 0 else "cpu")
+        if local_rank >= 0:
+            self.device = torch.device(f"cuda:{local_rank}")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
+        else:
+            self.device = torch.device("cpu")
         model = model.to(self.device)
 
         if local_rank >= 0:
@@ -139,6 +144,10 @@ class SetoTrainer:
             if "cuda" in rng and torch.cuda.is_available():
                 torch.cuda.set_rng_state(rng["cuda"])
 
+        # Restore GradScaler
+        if "scaler" in meta and meta["scaler"] is not None:
+            self.scaler.load_state_dict(meta["scaler"])
+
         if self.is_main:
             print(f"Loaded from step {self.global_step} ({self.tokens_seen:,} tokens)")
 
@@ -167,6 +176,7 @@ class SetoTrainer:
             print(f"Initialized from {checkpoint_path} (model weights only)")
 
     def train(self):
+        from contextlib import nullcontext
         if self.is_main:
             m = self.model.module if hasattr(self.model, "module") else self.model
             print(f"Pretraining | Steps: {self.config.max_steps} | LR: {self.config.lr}")
@@ -178,6 +188,7 @@ class SetoTrainer:
         self.model.train()
         running_loss = 0.0
         start_time = time.time()
+        is_ddp = hasattr(self.model, "module") and hasattr(self.model, "no_sync")
 
         while self.global_step < self.config.max_steps:
             if self.train_sampler is not None:
@@ -194,10 +205,14 @@ class SetoTrainer:
                     _, loss = self.model(input_ids, targets=labels)
                     loss = loss / self.config.grad_accum_steps
 
-                if self.config.use_fp16:
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                # DDP: skip gradient sync on microbatches (except last)
+                sync_now = (batch_idx + 1) % self.config.grad_accum_steps == 0
+                ctx = nullcontext() if (not is_ddp or sync_now) else self.model.no_sync()
+                with ctx:
+                    if self.config.use_fp16:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
                 running_loss += loss.item()
 
@@ -281,6 +296,7 @@ class SetoTrainer:
             model=self.model.module if hasattr(self.model, "module") else self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
+            scaler=self.scaler,
             step=self.global_step,
             loss=loss,
             config=config_dict,

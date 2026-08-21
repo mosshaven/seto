@@ -19,9 +19,10 @@ from .config import ModelConfig, TrainConfig
 def setup_distributed(local_rank: int):
     if local_rank == -1:
         return
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group("nccl", rank=local_rank, world_size=int(os.environ.get("WORLD_SIZE", 1)))
+    # torchrun already sets MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
+    # Only call init_process_group if torchrun didn't already do it
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
 
 

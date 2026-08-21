@@ -43,7 +43,13 @@ def parse_args():
 
 
 def main():
+    # Force unbuffered output so torchrun prints immediately
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True)
+
     args = parse_args()
+    print(f"[train.py] Starting stage={args.stage} model={args.model_config}", flush=True)
 
     # Handle torchrun LOCAL_RANK
     if args.local_rank == -1 and "LOCAL_RANK" in os.environ:

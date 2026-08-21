@@ -51,6 +51,7 @@ def main():
 
     args = parse_args()
     print(f"[train.py] Starting stage={args.stage} model={args.model_config}", flush=True)
+    print(f"[train.py] LOCAL_RANK env={os.environ.get('LOCAL_RANK', 'NOT SET')} local_rank arg={args.local_rank}", flush=True)
 
     # Handle torchrun LOCAL_RANK
     if args.local_rank == -1 and "LOCAL_RANK" in os.environ:
@@ -108,6 +109,13 @@ def main():
 
         if is_main:
             print(f"Model size: {sum(p.numel() * p.element_size() for p in model.parameters()) / 1e6:.1f} MB")
+            local_rank = args.local_rank
+            device = "cpu"
+            if local_rank >= 0:
+                device = f"cuda:{local_rank}"
+            elif torch.cuda.is_available():
+                device = "cuda:0"
+            print(f"[train.py] Device: {device} | LOCAL_RANK: {local_rank}", flush=True)
 
         if args.stage in ("pretrain", "cooldown"):
             dataset = ShardDataset(args.data_dir, seq_len=model_config.max_seq_len)

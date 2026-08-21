@@ -36,6 +36,7 @@ def parse_args():
     p.add_argument("--seq-len", type=int, default=None, help="Override model max_seq_len")
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--save-every", type=int, default=None)
     p.add_argument("--fp16", action="store_true", default=True)
     p.add_argument("--no-fp16", action="store_false", dest="fp16")
     p.add_argument("--dpo-ref-model", default=None)
@@ -89,6 +90,8 @@ def main():
             train_config.lr = args.lr
         if args.max_steps:
             train_config.max_steps = args.max_steps
+        if args.save_every:
+            train_config.save_every = args.save_every
         train_config.use_fp16 = args.fp16
         train_config.local_rank = args.local_rank
         train_config.checkpoint_dir = os.path.join(args.output_dir, f"checkpoints_{args.stage}")

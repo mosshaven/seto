@@ -2,11 +2,13 @@
 """Seto training script — pretrain / cooldown / sft / dpo."""
 
 import argparse
+import copy
 import json
 import os
 import sys
 
 import torch
+import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -76,7 +78,10 @@ def main():
 
     try:
         model_map = {"tiny": MODEL_TINY, "small": MODEL_SMALL, "base": MODEL_BASE}
-        model_config = model_map[args.model_config]
+        model_config = copy.deepcopy(model_map[args.model_config])
+
+        if args.seq_len:
+            model_config.max_seq_len = args.seq_len
 
         stage_map = {
             "pretrain": STAGE_PRETRAIN,
@@ -87,14 +92,11 @@ def main():
         train_config = stage_map[args.stage]
 
         # Set DDP-aware config values
-        import torch.distributed as dist
         if dist.is_initialized():
             train_config.world_size = dist.get_world_size()
 
         # Sync max_seq_len from model config
         train_config.max_seq_len = model_config.max_seq_len
-        if args.seq_len:
-            train_config.max_seq_len = args.seq_len
 
         if args.batch_size:
             train_config.batch_size = args.batch_size

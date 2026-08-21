@@ -143,7 +143,10 @@ class SetoTrainer:
             random.setstate(rng.get("python"))
             np.random.set_state(rng.get("numpy"))
             if "cuda" in rng and torch.cuda.is_available():
-                torch.cuda.set_rng_state(rng["cuda"])
+                cuda_rng = rng["cuda"]
+                if isinstance(cuda_rng, torch.Tensor):
+                    cuda_rng = cuda_rng.cpu()
+                torch.cuda.set_rng_state(cuda_rng)
 
         # Restore GradScaler
         if "scaler" in meta and meta["scaler"] is not None:

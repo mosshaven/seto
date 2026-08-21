@@ -195,7 +195,15 @@ def main():
             torch.save(state_dict, os.path.join(final_dir, "model.pt"))
             with open(os.path.join(final_dir, "config.json"), "w") as f:
                 json.dump(model_config.__dict__, f, indent=2)
-            print(f"Saved to {final_dir}")
+
+            # Package into ZIP
+            import zipfile, shutil
+            zip_path = os.path.join(args.output_dir, f"final_{args.stage}.zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fp in os.listdir(final_dir):
+                    zf.write(os.path.join(final_dir, fp), f"final_{args.stage}/{fp}")
+            shutil.rmtree(final_dir)
+            print(f"Saved to {zip_path}")
 
     finally:
         cleanup_distributed()

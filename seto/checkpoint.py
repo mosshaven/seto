@@ -66,7 +66,7 @@ def save_checkpoint(
     zip_path = None
     if zip_it:
         zip_path = save_dir / f"seto_{ckpt_name}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
             for file_path in ckpt_dir.iterdir():
                 arcname = f"{ckpt_name}/{file_path.name}"
                 zf.write(file_path, arcname)

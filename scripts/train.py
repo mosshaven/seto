@@ -35,6 +35,7 @@ def parse_args():
     p.add_argument("--grad-accum", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=None, help="Override model max_seq_len")
     p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--warmup-steps", type=int, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--save-every", type=int, default=None)
     p.add_argument("--clean", action="store_true", help="Delete old checkpoints before training")
@@ -51,24 +52,27 @@ def main():
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True)
 
     args = parse_args()
-    print(f"[train.py] Starting stage={args.stage} model={args.model_config}", flush=True)
-    print(f"[train.py] LOCAL_RANK env={os.environ.get('LOCAL_RANK', 'NOT SET')} local_rank arg={args.local_rank}", flush=True)
 
-    # Clean old checkpoints if requested
-    if args.clean:
-        from seto.checkpoint import clean_checkpoints
-        ckpt_dir = os.path.join(args.output_dir, f"checkpoints_{args.stage}")
-        if os.path.exists(ckpt_dir):
-            clean_checkpoints(ckpt_dir)
-            print(f"[train.py] Cleaned checkpoints in {ckpt_dir}", flush=True)
-
-    # Handle torchrun LOCAL_RANK
+    # Handle torchrun LOCAL_RANK FIRST
     if args.local_rank == -1 and "LOCAL_RANK" in os.environ:
         args.local_rank = int(os.environ["LOCAL_RANK"])
+
+    print(f"[train.py] Starting stage={args.stage} model={args.model_config}", flush=True)
+    print(f"[train.py] LOCAL_RANK={args.local_rank}", flush=True)
 
     # Setup DDP
     setup_distributed(args.local_rank)
     is_main = args.local_rank in [-1, 0]
+
+    # Clean old checkpoints — only rank 0, then barrier
+    if args.clean:
+        from seto.checkpoint import clean_checkpoints
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoints_{args.stage}")
+        if os.path.exists(ckpt_dir) and is_main:
+            clean_checkpoints(ckpt_dir)
+            print(f"[train.py] Cleaned checkpoints in {ckpt_dir}", flush=True)
+        if dist.is_initialized():
+            dist.barrier()
 
     try:
         model_map = {"tiny": MODEL_TINY, "small": MODEL_SMALL, "base": MODEL_BASE}
@@ -98,6 +102,8 @@ def main():
             train_config.grad_accum_steps = args.grad_accum
         if args.lr:
             train_config.lr = args.lr
+        if args.warmup_steps:
+            train_config.warmup_steps = args.warmup_steps
         if args.max_steps:
             train_config.max_steps = args.max_steps
         if args.save_every:
@@ -199,7 +205,7 @@ def main():
             # Package into ZIP
             import zipfile, shutil
             zip_path = os.path.join(args.output_dir, f"final_{args.stage}.zip")
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
                 for fp in os.listdir(final_dir):
                     zf.write(os.path.join(final_dir, fp), f"final_{args.stage}/{fp}")
             shutil.rmtree(final_dir)

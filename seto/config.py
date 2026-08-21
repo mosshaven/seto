@@ -29,7 +29,7 @@ class ModelConfig:
             self.d_model * (self.d_model + 2 * (self.d_model // self.n_heads * self.n_kv_heads))
             + self.d_model * self.d_model
             + 3 * self.d_model * self.d_ff
-            + 4 * self.d_model  # 2x RMSNorm (attention_norm, ffn_norm)
+            + 2 * self.d_model  # 2x RMSNorm (attention_norm, ffn_norm)
         )
         final_norm = self.d_model  # final RMSNorm
         lm_head = 0 if self.tie_embeddings else self.vocab_size * self.d_model

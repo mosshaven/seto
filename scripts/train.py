@@ -37,6 +37,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--save-every", type=int, default=None)
+    p.add_argument("--clean", action="store_true", help="Delete old checkpoints before training")
     p.add_argument("--fp16", action="store_true", default=True)
     p.add_argument("--no-fp16", action="store_false", dest="fp16")
     p.add_argument("--dpo-ref-model", default=None)
@@ -52,6 +53,14 @@ def main():
     args = parse_args()
     print(f"[train.py] Starting stage={args.stage} model={args.model_config}", flush=True)
     print(f"[train.py] LOCAL_RANK env={os.environ.get('LOCAL_RANK', 'NOT SET')} local_rank arg={args.local_rank}", flush=True)
+
+    # Clean old checkpoints if requested
+    if args.clean:
+        from seto.checkpoint import clean_checkpoints
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoints_{args.stage}")
+        if os.path.exists(ckpt_dir):
+            clean_checkpoints(ckpt_dir)
+            print(f"[train.py] Cleaned checkpoints in {ckpt_dir}", flush=True)
 
     # Handle torchrun LOCAL_RANK
     if args.local_rank == -1 and "LOCAL_RANK" in os.environ:
@@ -129,6 +138,11 @@ def main():
                 latest = get_latest_checkpoint(train_config.checkpoint_dir)
                 if latest:
                     trainer.resume(latest)
+
+            # Print device info from ALL ranks
+            local_rank = args.local_rank
+            dev = f"cuda:{local_rank}" if local_rank >= 0 else ("cuda:0" if torch.cuda.is_available() else "cpu")
+            print(f"[rank {local_rank}] device={dev}", flush=True)
 
             trainer.train()
 

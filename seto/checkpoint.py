@@ -160,3 +160,18 @@ def get_latest_checkpoint(save_dir: str) -> Optional[str]:
         return str(dirs[-1])
 
     return None
+
+
+def clean_checkpoints(save_dir: str):
+    """Remove all checkpoint zips and extracted dirs."""
+    save_dir = Path(save_dir)
+    for f in save_dir.glob("seto_step_*.zip"):
+        f.unlink(missing_ok=True)
+    for d in save_dir.glob("seto_step_*"):
+        if d.is_dir():
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+    for d in save_dir.glob("step_*"):
+        if d.is_dir():
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)

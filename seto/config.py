@@ -84,9 +84,9 @@ class TrainConfig:
     # Checkpointing
     save_every: int = 1000
     eval_every: int = 500
-    keep_last_n: int = 3
+    keep_last_n: int = 1
     checkpoint_dir: str = "checkpoints"
-    zip_checkpoints: bool = True
+    # Checkpoint: keep 1 dir, ZIP only for final export
 
     # Logging
     log_every: int = 10

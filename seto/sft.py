@@ -202,7 +202,6 @@ class SFTTrainer:
             loss=0.0,
             config={"stage": "sft", "step": self.global_step},
             save_dir=self.config.checkpoint_dir,
-            zip_it=self.config.zip_checkpoints,
             keep_last_n=self.config.keep_last_n,
             rng_state=rng_state,
             tokens_seen=self.global_step * self.config.tokens_per_step,

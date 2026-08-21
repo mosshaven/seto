@@ -28,7 +28,12 @@ def save_checkpoint(
     ckpt_name = f"step_{step:08d}"
     ckpt_dir = save_dir / ckpt_name
 
-    # Delete target dir if it already exists (atomic-ish replace)
+    # Low-disk: remove previous checkpoints BEFORE writing new one
+    if keep_last_n == 1:
+        for old in save_dir.glob("step_*"):
+            if old != ckpt_dir and old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
 

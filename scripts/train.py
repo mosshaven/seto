@@ -21,6 +21,7 @@ from seto import (
     get_latest_checkpoint,
 )
 from seto.trainer import setup_distributed, cleanup_distributed
+from seto.checkpoint import zip_checkpoint
 
 
 def parse_args():
@@ -203,12 +204,9 @@ def main():
             with open(os.path.join(final_dir, "config.json"), "w") as f:
                 json.dump(model_config.__dict__, f, indent=2)
 
-            # Package into ZIP
-            import zipfile, shutil
+            # Package into ZIP for export
             zip_path = os.path.join(args.output_dir, f"final_{args.stage}.zip")
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-                for fp in os.listdir(final_dir):
-                    zf.write(os.path.join(final_dir, fp), f"final_{args.stage}/{fp}")
+            zip_checkpoint(final_dir, zip_path)
             shutil.rmtree(final_dir)
             print(f"Saved to {zip_path}")
 

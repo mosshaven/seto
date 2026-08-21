@@ -174,7 +174,6 @@ def main():
             dataset = DPODataset(args.data_dir, seq_len=model_config.max_seq_len, tokenizer=tokenizer,
                                  max_samples=train_config.dpo_max_samples)
 
-            import copy
             ref_model = SetoLM(model_config)
             if args.dpo_ref_model:
                 from seto.checkpoint import load_checkpoint

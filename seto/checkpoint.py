@@ -89,12 +89,20 @@ def load_checkpoint(
     if path.suffix == ".zip":
         # Extract ZIP to parent directory
         extract_dir = path.parent / path.stem
-        extract_dir.mkdir(exist_ok=True)
-        with zipfile.ZipFile(path, "r") as zf:
-            zf.extractall(extract_dir)
+        is_distributed = torch.distributed.is_initialized()
+        is_main = (not is_distributed) or torch.distributed.get_rank() == 0
+
+        if is_main:
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(path, "r") as zf:
+                zf.extractall(extract_dir)
+
+        # Barrier: wait for main to finish extracting
+        if is_distributed:
+            torch.distributed.barrier()
+
         # The ZIP contains step_XXXXXXXX/model.pt etc.
-        # Find the actual checkpoint directory
-        subdirs = list(extract_dir.iterdir())
+        subdirs = sorted(extract_dir.iterdir()) if extract_dir.exists() else []
         if subdirs and subdirs[0].is_dir():
             path = subdirs[0]
         else:

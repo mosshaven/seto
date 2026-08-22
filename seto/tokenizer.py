@@ -74,7 +74,10 @@ class SetoTokenizer:
             with open(config_file) as f:
                 config = json.load(f)
             instance.vocab_size = config.get("vocab_size", 48000)
-            instance.special_tokens = config.get("special_tokens", SPECIAL_TOKENS)
+            instance.special_tokens = {
+                **SPECIAL_TOKENS,
+                **config.get("special_tokens", {}),
+            }
 
         return instance
 
@@ -101,6 +104,7 @@ class SetoTokenizer:
     def add_special_tokens(self, tokens: List[str]) -> int:
         """Add new special tokens to existing tokenizer. Returns number added."""
         added = self._tokenizer.add_special_tokens(tokens)
+        self.vocab_size = self._tokenizer.get_vocab_size(with_added_tokens=True)
         return added
 
     def encode(self, text: str, add_bos: bool = True, add_eos: bool = True) -> List[int]:
@@ -130,4 +134,6 @@ class SetoTokenizer:
         return text
 
     def __len__(self) -> int:
-        return self.vocab_size
+        if self._tokenizer is None:
+            return self.vocab_size
+        return self._tokenizer.get_vocab_size(with_added_tokens=True)

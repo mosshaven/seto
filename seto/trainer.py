@@ -124,7 +124,8 @@ class SetoTrainer:
         """Load full checkpoint state."""
         meta = load_checkpoint(
             checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
-            self.optimizer if load_optimizer else None, str(self.device)
+            self.optimizer if load_optimizer else None, str(self.device),
+            allow_vocab_growth=not load_optimizer,
         )
         self.global_step = meta.get("step", 0)
         self.tokens_seen = meta.get("tokens_seen", 0)

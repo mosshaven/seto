@@ -14,6 +14,41 @@ import torch
 import torch.nn as nn
 
 
+VOCAB_WEIGHT_KEYS = {"tok_embeddings.weight", "output.weight"}
+
+
+def _load_model_state(
+    model: nn.Module,
+    state_dict: dict,
+    allow_vocab_growth: bool,
+) -> None:
+    if allow_vocab_growth:
+        current = model.state_dict()
+        state_dict = dict(state_dict)
+        for key in VOCAB_WEIGHT_KEYS:
+            if key not in state_dict or key not in current:
+                continue
+            saved = state_dict[key]
+            target = current[key]
+            if saved.shape == target.shape:
+                continue
+            can_grow = (
+                saved.ndim == 2
+                and target.ndim == 2
+                and saved.shape[1] == target.shape[1]
+                and saved.shape[0] < target.shape[0]
+            )
+            if not can_grow:
+                raise RuntimeError(
+                    f"Cannot adapt {key}: checkpoint {tuple(saved.shape)} -> "
+                    f"model {tuple(target.shape)}"
+                )
+            expanded = target.clone()
+            expanded[:saved.shape[0]].copy_(saved.to(expanded.device, expanded.dtype))
+            state_dict[key] = expanded
+    model.load_state_dict(state_dict)
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -82,6 +117,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
     device: str = "cpu",
+    allow_vocab_growth: bool = False,
 ) -> dict:
     path = Path(checkpoint_path)
 
@@ -93,10 +129,8 @@ def load_checkpoint(
             # Load model
             with zf.open("model.pt") as f:
                 state_dict = torch.load(f, map_location=device, weights_only=True)
-            if hasattr(model, "module"):
-                model.module.load_state_dict(state_dict)
-            else:
-                model.load_state_dict(state_dict)
+            raw_model = model.module if hasattr(model, "module") else model
+            _load_model_state(raw_model, state_dict, allow_vocab_growth)
 
             # Load optimizer
             if optimizer is not None and "optimizer.pt" in zf.namelist():
@@ -126,10 +160,8 @@ def load_checkpoint(
 
     # Legacy: plain directory
     state_dict = torch.load(path / "model.pt", map_location=device, weights_only=True)
-    if hasattr(model, "module"):
-        model.module.load_state_dict(state_dict)
-    else:
-        model.load_state_dict(state_dict)
+    raw_model = model.module if hasattr(model, "module") else model
+    _load_model_state(raw_model, state_dict, allow_vocab_growth)
 
     if optimizer is not None and (path / "optimizer.pt").exists():
         optimizer.load_state_dict(
@@ -199,7 +231,8 @@ def zip_checkpoint(ckpt_dir: str, output_path: str) -> str:
     output_path = Path(output_path)
 
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_STORED) as zf:
-        for fp in ckpt_dir.iterdir():
-            zf.write(fp, f"{ckpt_dir.name}/{fp.name}")
+        for fp in ckpt_dir.rglob("*"):
+            if fp.is_file():
+                zf.write(fp, Path(ckpt_dir.name) / fp.relative_to(ckpt_dir))
 
     return str(output_path)

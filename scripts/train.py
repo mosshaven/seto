@@ -29,8 +29,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train Seto")
     p.add_argument("--stage", required=True, choices=["pretrain", "cooldown", "sft", "dpo"])
     p.add_argument("--model-config", default="tiny", choices=["tiny", "small", "base"])
-    p.add_argument("--data-dir", required=True, help="Directory with .bin shards or SFT/DPO data")
-    p.add_argument("--dataset", default=None, help="Alias for --data-dir (SFT/DPO JSONL)")
+    p.add_argument("--model-config-file", help="Exact ModelConfig JSON from a checkpoint")
+    data = p.add_mutually_exclusive_group(required=True)
+    data.add_argument("--data-dir", help="Directory with .bin shards or SFT/DPO data")
+    data.add_argument("--dataset", help="SFT/DPO JSON or JSONL file")
     p.add_argument("--output-dir", default="seto-output")
     p.add_argument("--tokenizer", default="seto-tokenizer")
     p.add_argument("--resume", default=None, help="Resume from checkpoint (same stage)")
@@ -47,7 +49,26 @@ def parse_args():
     p.add_argument("--fp16", action="store_true", default=True)
     p.add_argument("--no-fp16", action="store_false", dest="fp16")
     p.add_argument("--dpo-ref-model", default=None)
+    p.add_argument(
+        "--delete-init-from-after-load",
+        action="store_true",
+        help="Delete --init-from after every rank has loaded model weights",
+    )
     return p.parse_args()
+
+
+def delete_loaded_init(path: str, is_main: bool) -> None:
+    if dist.is_initialized():
+        dist.barrier()
+    if is_main:
+        init_path = Path(path)
+        if init_path.is_dir():
+            shutil.rmtree(init_path)
+        else:
+            init_path.unlink(missing_ok=True)
+        print(f"Deleted loaded init artifact: {init_path}", flush=True)
+    if dist.is_initialized():
+        dist.barrier()
 
 
 def main():
@@ -58,7 +79,6 @@ def main():
 
     args = parse_args()
 
-    # --dataset overrides --data-dir for convenience
     if args.dataset:
         args.data_dir = args.dataset
 
@@ -85,7 +105,11 @@ def main():
 
     try:
         model_map = {"tiny": MODEL_TINY, "small": MODEL_SMALL, "base": MODEL_BASE}
-        model_config = copy.deepcopy(model_map[args.model_config])
+        if args.model_config_file:
+            with open(args.model_config_file) as f:
+                model_config = ModelConfig(**json.load(f))
+        else:
+            model_config = copy.deepcopy(model_map[args.model_config])
 
         if args.seq_len:
             model_config.max_seq_len = args.seq_len
@@ -124,8 +148,6 @@ def main():
 
         if is_main:
             os.makedirs(args.output_dir, exist_ok=True)
-            with open(os.path.join(args.output_dir, f"config_{args.stage}.json"), "w") as f:
-                json.dump({"model": model_config.__dict__, "training": train_config.__dict__}, f, indent=2)
             print(f"Seto | Stage: {args.stage} | Model: {args.model_config} | Params: ~{model_config.num_params():,}")
 
         tokenizer = SetoTokenizer.from_pretrained(args.tokenizer)
@@ -146,6 +168,14 @@ def main():
             model_config.vocab_size = tok_vocab
 
         if is_main:
+            with open(os.path.join(args.output_dir, f"config_{args.stage}.json"), "w") as f:
+                json.dump(
+                    {"model": model_config.__dict__, "training": train_config.__dict__},
+                    f,
+                    indent=2,
+                )
+
+        if is_main:
             print(f"Model size: {sum(p.numel() * p.element_size() for p in model.parameters()) / 1e6:.1f} MB")
             local_rank = args.local_rank
             device = "cpu"
@@ -163,6 +193,8 @@ def main():
                 trainer.resume(args.resume)
             elif args.init_from:
                 trainer.init_from(args.init_from)
+                if args.delete_init_from_after_load:
+                    delete_loaded_init(args.init_from, is_main)
             else:
                 latest = get_latest_checkpoint(train_config.checkpoint_dir)
                 if latest:
@@ -184,6 +216,8 @@ def main():
                 trainer.resume(args.resume)
             elif args.init_from:
                 trainer.init_from(args.init_from)
+                if args.delete_init_from_after_load:
+                    delete_loaded_init(args.init_from, is_main)
             else:
                 latest = get_latest_checkpoint(train_config.checkpoint_dir)
                 if latest:
@@ -198,10 +232,10 @@ def main():
             ref_model = SetoLM(model_config)
             if args.dpo_ref_model:
                 from seto.checkpoint import load_checkpoint
-                load_checkpoint(args.dpo_ref_model, ref_model)
+                load_checkpoint(args.dpo_ref_model, ref_model, allow_vocab_growth=True)
             elif args.init_from:
                 from seto.checkpoint import load_checkpoint
-                load_checkpoint(args.init_from, ref_model)
+                load_checkpoint(args.init_from, ref_model, allow_vocab_growth=True)
 
             trainer = DPOTrainer(model, ref_model, dataset, tokenizer, train_config, args.local_rank)
 

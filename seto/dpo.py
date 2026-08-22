@@ -131,7 +131,7 @@ class DPOTrainer:
     def init_from(self, checkpoint_path: str):
         load_checkpoint(
             checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
-            None, str(self.device)
+            None, str(self.device), allow_vocab_growth=True
         )
         self.optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, self.model.parameters()),

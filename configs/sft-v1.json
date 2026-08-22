@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "base_dir": "..",
+  "seed": 42,
+  "target_examples": 50000,
+  "validation_paths": [
+    "datasets/validation/seto-sft-val-v1.jsonl"
+  ],
+  "sources": [
+    {
+      "name": "ultrachat",
+      "paths": ["datasets/sft/ultrachat/*.jsonl"],
+      "weight": 0.40
+    },
+    {
+      "name": "wildchat",
+      "paths": ["datasets/sft/wildchat/*.jsonl"],
+      "weight": 0.25
+    },
+    {
+      "name": "oasst1",
+      "paths": ["datasets/sft/oasst1.jsonl"],
+      "weight": 0.15
+    },
+    {
+      "name": "russian",
+      "paths": ["datasets/sft/russian/*.jsonl"],
+      "weight": 0.10
+    },
+    {
+      "name": "synthetic_curated",
+      "paths": ["datasets/sft/synthetic-curated/*.jsonl"],
+      "weight": 0.10
+    }
+  ]
+}

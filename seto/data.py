@@ -10,6 +10,12 @@ import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
 
 
+def json_data_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path] if path.suffix in {".json", ".jsonl"} else []
+    return list(path.rglob("*.jsonl")) + list(path.rglob("*.json"))
+
+
 class ShardDataset(Dataset):
     """Memory-mapped uint16 binary shards — true mmap, no concatenation."""
 
@@ -85,7 +91,7 @@ class SFTDataset(Dataset):
         self.examples = []
 
         data_path = Path(data_dir)
-        files = list(data_path.rglob("*.jsonl")) + list(data_path.rglob("*.json"))
+        files = json_data_files(data_path)
 
         for f in files:
             try:
@@ -118,18 +124,17 @@ class SFTDataset(Dataset):
 
     def _add_multiturn(self, messages: list):
         """Split multi-turn conversation into per-turn training examples."""
-        # Find all assistant turns
-        assistant_indices = [i for i, m in enumerate(messages)
-                             if m.get("role") in ("assistant",)]
+        target_indices = [
+            i for i, message in enumerate(messages)
+            if message.get("role") in ("assistant", "tool_call")
+        ]
 
-        if not assistant_indices:
+        if not target_indices:
             return
 
-        for assistant_idx in assistant_indices:
-            # Prompt = all messages up to (but not including) this assistant turn
-            prompt_messages = messages[:assistant_idx]
-            # Completion = this assistant turn
-            completion = messages[assistant_idx]
+        for target_idx in target_indices:
+            prompt_messages = messages[:target_idx]
+            completion = messages[target_idx]
 
             if prompt_messages and completion.get("content"):
                 self.examples.append({
@@ -152,36 +157,51 @@ class SFTDataset(Dataset):
             prompt_ids = self.tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
 
             answer_text = completion.get("content", "")
+            if completion.get("role") == "tool_call":
+                answer_text = f"{self.tokenizer.special_tokens['tool_call']}\n{answer_text}"
             answer_ids = self.tokenizer.encode(answer_text, add_bos=False, add_eos=True)
-
-            full_ids = prompt_ids + answer_ids
-            prompt_len = len(prompt_ids)
+            pad_id = self.tokenizer.pad_id
+            eos_id = self.tokenizer.eos_id
         else:
-            full_ids = []
-            prompt_len = 0
+            prompt_ids = []
             for msg in prompt_messages:
                 content = msg.get("content", "")
                 for ch in content:
-                    full_ids.append(ord(ch) % 48000)
-            prompt_len = len(full_ids)
+                    prompt_ids.append(ord(ch) % 48000)
             answer = completion.get("content", "")
-            for ch in answer:
-                full_ids.append(ord(ch) % 48000)
-            full_ids.append(2)  # EOS
+            if completion.get("role") == "tool_call":
+                answer = f"<|tool_call|>\n{answer}"
+            answer_ids = [ord(ch) % 48000 for ch in answer] + [2]
+            pad_id = 0
+            eos_id = 2
+
+        max_tokens = self.seq_len + 1
+        # Keep the complete target where possible; trim oldest context first.
+        if len(answer_ids) >= max_tokens:
+            prompt_budget = min(
+                len(prompt_ids),
+                max(1, min(max_tokens - 1, max(16, max_tokens // 4))),
+            )
+            answer_budget = max_tokens - prompt_budget
+            answer_ids = answer_ids[:answer_budget]
+            answer_ids[-1] = eos_id
+        prompt_ids = prompt_ids[-(max_tokens - len(answer_ids)):]
+        full_ids = prompt_ids + answer_ids
+        prompt_len = len(prompt_ids)
 
         # Pad/truncate
-        if len(full_ids) < self.seq_len:
-            full_ids = full_ids + [0] * (self.seq_len - len(full_ids))
+        if len(full_ids) < max_tokens:
+            full_ids = full_ids + [pad_id] * (max_tokens - len(full_ids))
         else:
-            full_ids = full_ids[:self.seq_len]
+            full_ids = full_ids[:max_tokens]
 
         # Causal shift: input[:-1] predicts input[1:]
         input_ids = torch.tensor(full_ids[:-1], dtype=torch.long)
         labels = torch.tensor(full_ids[1:], dtype=torch.long)
 
         # Mask prompt tokens and padding in labels
-        labels[:prompt_len - 1] = -100
-        labels[input_ids == 0] = -100
+        labels[:max(0, prompt_len - 1)] = -100
+        labels[labels == pad_id] = -100
 
         return {"input_ids": input_ids, "labels": labels}
 
@@ -195,7 +215,7 @@ class DPODataset(Dataset):
         self.data = []
 
         data_path = Path(data_dir)
-        files = list(data_path.rglob("*.jsonl")) + list(data_path.rglob("*.json"))
+        files = json_data_files(data_path)
 
         for f in files:
             try:

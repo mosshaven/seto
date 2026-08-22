@@ -59,6 +59,7 @@ directly without selecting architecture manually:
 ```bash
 python scripts/chat.py --model output/final_sft.zip
 python scripts/chat.py --model output/final_sft/model.pt
+python scripts/chat.py --model output/final_sft.zip --prompt "Привет, кто ты?"
 ```
 
 Use `--tokenizer PATH` only for older exports that did not package tokenizer

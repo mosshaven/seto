@@ -128,9 +128,11 @@ def generate(
 ):
     text = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
     input_ids = torch.tensor([tokenizer.encode(text, add_bos=True, add_eos=False)], device=device)
+    generated_ids = []
 
     for _ in range(max_new_tokens):
-        logits, _ = model(input_ids)
+        model_input = input_ids[:, -model.config.max_seq_len:]
+        logits, _ = model(model_input)
         logits = logits[:, -1, :] / temperature
 
         if top_k > 0:
@@ -152,10 +154,10 @@ def generate(
         if next_token.item() == tokenizer.eos_id:
             break
 
+        generated_ids.append(next_token.item())
         input_ids = torch.cat([input_ids, next_token], dim=-1)
 
-    output_ids = input_ids[0].tolist()
-    return tokenizer.decode(output_ids, skip_special_tokens=True)
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 
 @torch.inference_mode()
@@ -238,6 +240,11 @@ def main():
     )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--system-prompt", default="Ты Seto — полезный русскоязычный ассистент.")
+    parser.add_argument("--prompt", help="Single prompt for notebook/non-interactive use")
+    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--top-p", type=float, default=0.9)
     args = parser.parse_args()
 
     device = args.device
@@ -252,7 +259,25 @@ def main():
     tokenizer = load_tokenizer(args.model, args.tokenizer)
     print(f"Vocab: {len(tokenizer)}")
 
-    chat(model, tokenizer, device, args.system_prompt)
+    if args.prompt is not None:
+        messages = []
+        if args.system_prompt:
+            messages.append({"role": "system", "content": args.system_prompt})
+        messages.append({"role": "user", "content": args.prompt})
+        print(
+            generate(
+                model,
+                tokenizer,
+                messages,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                device=device,
+            )
+        )
+    else:
+        chat(model, tokenizer, device, args.system_prompt)
 
 
 if __name__ == "__main__":

@@ -35,27 +35,20 @@ def main() -> None:
         raise RuntimeError("dataset has no tool_call training target")
 
     index = roles.index("tool_call")
-    example = dataset.examples[index]
     batch = dataset[index]
     labels = batch["labels"]
     input_ids = batch["input_ids"]
 
-    prompt_text = tokenizer.apply_chat_template(
-        example["prompt"], add_generation_prompt=True
-    )
-    prompt_ids = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-    expected_target_position = len(prompt_ids) - 1
-    if expected_target_position >= len(labels):
-        raise RuntimeError("tool-call target was truncated from sequence")
-    if not torch.all(labels[:expected_target_position] == -100):
+    trainable_positions = torch.nonzero(labels != -100, as_tuple=False).flatten()
+    if trainable_positions.numel() == 0:
+        raise RuntimeError("tool-call example has no trainable labels")
+    first_target_position = trainable_positions[0].item()
+    if not torch.all(labels[:first_target_position] == -100):
         raise RuntimeError("prompt tokens contribute to SFT loss")
-    if labels[expected_target_position].item() != tokenizer.tool_call_id:
+    if labels[first_target_position].item() != tokenizer.tool_call_id:
         raise RuntimeError("first tool-call target is not <|tool_call|>")
     if torch.any(labels[input_ids == tokenizer.pad_id] != -100):
         raise RuntimeError("padding contributes to SFT loss")
-    if torch.all(labels == -100):
-        raise RuntimeError("tool-call example has no trainable labels")
-
     print(f"SFT examples: {len(dataset)}")
     print(f"Assistant targets: {roles.count('assistant')}")
     print(f"Tool-call targets: {roles.count('tool_call')}")

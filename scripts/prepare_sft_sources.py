@@ -38,7 +38,12 @@ SOURCES = {
     "tools": {
         "dataset": "NousResearch/hermes-function-calling-v1",
         "revision": "dae3e1d28cfbcf4b915c04ea1e072030529b4bda",
-        "config": "func_calling",
+        "config": None,
+        "configs": [
+            "func_calling",
+            "func_calling_singleturn",
+            "glaive_func_calling"
+        ],
         "split": "train",
         "license": "Apache-2.0",
     },
@@ -276,8 +281,17 @@ def tool_messages(row: dict) -> list[dict] | None:
 
 
 def tools_records(seed: int):
-    for row in stream_source("tools", seed):
-        yield tool_messages(row)
+    source = SOURCES["tools"]
+    for index, config in enumerate(source["configs"]):
+        dataset = load_dataset(
+            source["dataset"],
+            name=config,
+            split=source["split"],
+            revision=source["revision"],
+            streaming=True,
+        ).shuffle(seed=seed + index, buffer_size=10000)
+        for row in dataset:
+            yield tool_messages(row)
 
 
 def main() -> None:

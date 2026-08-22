@@ -22,6 +22,7 @@ MIX = WORK / "seto-sft-mix"
 BASE_MODEL = WORK / "seto-pretrain"
 TOKENIZER = WORK / "seto-tokenizer"
 OUTPUT = WORK / "seto-sft-v1"
+OLD_SMOKE_OUTPUT = WORK / "seto-sft-smoke"
 
 
 def run(*command, cwd=None):
@@ -46,7 +47,16 @@ print(f"Source: {source}")
 print(f"Pretrain ZIP: {pretrain_zip}")
 
 # Clean only disposable artifacts produced by this cell.
-for path in (REPO, HF_CACHE, SOURCES, MIX, BASE_MODEL, TOKENIZER, OUTPUT):
+for path in (
+    REPO,
+    HF_CACHE,
+    SOURCES,
+    MIX,
+    BASE_MODEL,
+    TOKENIZER,
+    OUTPUT,
+    OLD_SMOKE_OUTPUT,
+):
     if path.exists():
         shutil.rmtree(path)
 

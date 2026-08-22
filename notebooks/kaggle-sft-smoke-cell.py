@@ -135,11 +135,12 @@ run(
     "--delete-init-from-after-load",
     "--output-dir", SMOKE_OUTPUT,
     "--batch-size", "1",
-    "--grad-accum", "8",
+    "--grad-accum", "2",
     "--seq-len", "1024",
     "--warmup-steps", "2",
     "--max-steps", "10",
     "--save-every", "100",
+    "--log-every", "1",
     cwd=REPO,
 )
 

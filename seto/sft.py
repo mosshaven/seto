@@ -105,10 +105,31 @@ class SFTTrainer:
             print(f"Resumed SFT from step {self.global_step}")
 
     def init_from(self, checkpoint_path: str):
-        load_checkpoint(
-            checkpoint_path, self.model.module if hasattr(self.model, "module") else self.model,
-            None, str(self.device), allow_vocab_growth=True
-        )
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            if rank == 0:
+                print(f"[rank 0] Loading init weights from {checkpoint_path}", flush=True)
+                load_checkpoint(
+                    checkpoint_path,
+                    raw_model,
+                    None,
+                    str(self.device),
+                    allow_vocab_growth=True,
+                )
+            else:
+                print(f"[rank {rank}] Waiting for weights from rank 0", flush=True)
+            for parameter in raw_model.parameters():
+                torch.distributed.broadcast(parameter.data, src=0)
+            print(f"[rank {rank}] Init weights synchronized", flush=True)
+        else:
+            load_checkpoint(
+                checkpoint_path,
+                raw_model,
+                None,
+                str(self.device),
+                allow_vocab_growth=True,
+            )
         # Reset optimizer + scheduler for new stage
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -148,18 +169,16 @@ class SFTTrainer:
                 input_ids = batch["input_ids"].to(self.device, non_blocking=True)
                 labels = batch["labels"].to(self.device, non_blocking=True)
 
-                with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
-                    logits, _ = self.model(input_ids)
-                    loss = F.cross_entropy(
-                        logits.view(-1, logits.size(-1)),
-                        labels.view(-1),
-                        ignore_index=-100,
-                    ) / self.config.grad_accum_steps
-
-                # DDP: skip gradient sync on microbatches (except last)
                 sync_now = (batch_idx + 1) % self.config.grad_accum_steps == 0
                 ctx = nullcontext() if (not is_ddp or sync_now) else self.model.no_sync()
                 with ctx:
+                    with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                        logits, _ = self.model(input_ids)
+                        loss = F.cross_entropy(
+                            logits.view(-1, logits.size(-1)),
+                            labels.view(-1),
+                            ignore_index=-100,
+                        ) / self.config.grad_accum_steps
                     if self.config.use_fp16:
                         self.scaler.scale(loss).backward()
                     else:

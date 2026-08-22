@@ -45,6 +45,7 @@ def parse_args():
     p.add_argument("--warmup-steps", type=int, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--save-every", type=int, default=None)
+    p.add_argument("--log-every", type=int, default=None)
     p.add_argument("--clean", action="store_true", help="Delete old checkpoints before training")
     p.add_argument("--fp16", action="store_true", default=True)
     p.add_argument("--no-fp16", action="store_false", dest="fp16")
@@ -141,6 +142,8 @@ def main():
             train_config.max_steps = args.max_steps
         if args.save_every:
             train_config.save_every = args.save_every
+        if args.log_every:
+            train_config.log_every = args.log_every
         train_config.use_fp16 = args.fp16
         train_config.local_rank = args.local_rank
         train_config.checkpoint_dir = os.path.join(args.output_dir, f"checkpoints_{args.stage}")

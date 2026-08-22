@@ -143,6 +143,7 @@ def main():
             if is_main:
                 print(f"Resizing embeddings: {model_config.vocab_size} -> {tok_vocab}", flush=True)
             model.resize_embeddings(tok_vocab)
+            model_config.vocab_size = tok_vocab
 
         if is_main:
             print(f"Model size: {sum(p.numel() * p.element_size() for p in model.parameters()) / 1e6:.1f} MB")
@@ -222,6 +223,14 @@ def main():
             torch.save(state_dict, os.path.join(final_dir, "model.pt"))
             with open(os.path.join(final_dir, "config.json"), "w") as f:
                 json.dump(model_config.__dict__, f, indent=2)
+
+            # Save updated tokenizer (with new special tokens) alongside model
+            tok_dir = os.path.join(final_dir, "tokenizer")
+            os.makedirs(tok_dir, exist_ok=True)
+            tokenizer._tokenizer.save(os.path.join(tok_dir, "tokenizer.json"))
+            import json as _json
+            with open(os.path.join(tok_dir, "config.json"), "w") as f:
+                _json.dump({"vocab_size": len(tokenizer), "special_tokens": tokenizer.special_tokens}, f, indent=2)
 
             # Package into ZIP for export
             zip_path = os.path.join(args.output_dir, f"final_{args.stage}.zip")

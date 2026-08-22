@@ -1,5 +1,5 @@
 # Paste this file into one Kaggle notebook cell.
-# Required input: /kaggle/input/alleydick/notebook*/seto/
+# Required input: /kaggle/input/notebooks/alleydick/*/seto/
 
 import os
 import shutil
@@ -9,7 +9,10 @@ import zipfile
 from pathlib import Path
 
 
-INPUT_ROOT = Path("/kaggle/input/alleydick")
+INPUT_ROOTS = (
+    Path("/kaggle/input/notebooks/alleydick"),
+    Path("/kaggle/input/alleydick"),
+)
 WORK_ROOT = Path("/kaggle/working")
 REPO = WORK_ROOT / "seto"
 BASE_MODEL = WORK_ROOT / "seto-pretrain"
@@ -22,9 +25,16 @@ def run(*command, cwd=None):
     subprocess.run([str(part) for part in command], cwd=cwd, check=True)
 
 
-source_candidates = sorted(INPUT_ROOT.glob("notebook*/seto"))
+source_candidates = sorted(
+    path
+    for root in INPUT_ROOTS
+    if root.exists()
+    for path in root.glob("*/seto")
+)
 if not source_candidates:
-    raise FileNotFoundError("Missing /kaggle/input/alleydick/notebook*/seto")
+    raise FileNotFoundError(
+        "Missing /kaggle/input/notebooks/alleydick/*/seto"
+    )
 complete_sources = [
     path for path in source_candidates
     if (path / "seto-small" / "final_pretrain.zip").is_file()

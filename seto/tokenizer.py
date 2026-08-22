@@ -81,25 +81,46 @@ class SetoTokenizer:
 
         return instance
 
+    @classmethod
+    def from_serialized(
+        cls,
+        tokenizer_json: str,
+        config: Optional[dict] = None,
+    ) -> "SetoTokenizer":
+        """Load tokenizer from serialized JSON, for packaged checkpoints."""
+        instance = cls()
+        instance._tokenizer = Tokenizer.from_str(tokenizer_json)
+        instance._tokenizer.decoder = decoders.ByteLevel()
+        if config:
+            instance.vocab_size = config.get("vocab_size", 48000)
+            instance.special_tokens = {
+                **SPECIAL_TOKENS,
+                **config.get("special_tokens", {}),
+            }
+        instance.vocab_size = instance._tokenizer.get_vocab_size(
+            with_added_tokens=True
+        )
+        return instance
+
     @property
     def pad_id(self) -> int:
-        return self._tokenizer.token_to_id(SPECIAL_TOKENS["pad"])
+        return self._tokenizer.token_to_id(self.special_tokens["pad"])
 
     @property
     def bos_id(self) -> int:
-        return self._tokenizer.token_to_id(SPECIAL_TOKENS["bos"])
+        return self._tokenizer.token_to_id(self.special_tokens["bos"])
 
     @property
     def eos_id(self) -> int:
-        return self._tokenizer.token_to_id(SPECIAL_TOKENS["eos"])
+        return self._tokenizer.token_to_id(self.special_tokens["eos"])
 
     @property
     def tool_call_id(self) -> int:
-        return self._tokenizer.token_to_id(SPECIAL_TOKENS["tool_call"])
+        return self._tokenizer.token_to_id(self.special_tokens["tool_call"])
 
     @property
     def tool_result_id(self) -> int:
-        return self._tokenizer.token_to_id(SPECIAL_TOKENS["tool_result"])
+        return self._tokenizer.token_to_id(self.special_tokens["tool_result"])
 
     def add_special_tokens(self, tokens: List[str]) -> int:
         """Add new special tokens to existing tokenizer. Returns number added."""
@@ -128,9 +149,9 @@ class SetoTokenizer:
             parts.append(f"{token}\n{content}")
         if add_generation_prompt:
             parts.append(self.special_tokens["assistant"] + "\n")
-        text = SPECIAL_TOKENS["bos"] + "".join(parts)
+        text = self.special_tokens["bos"] + "".join(parts)
         if not add_generation_prompt:
-            text += SPECIAL_TOKENS["eos"]
+            text += self.special_tokens["eos"]
         return text
 
     def __len__(self) -> int:

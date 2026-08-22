@@ -2,9 +2,12 @@
 """Seto inference — chat with your model."""
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
+import zipfile
+from pathlib import Path
 
 import torch
 
@@ -15,30 +18,101 @@ from seto.model import SetoLM
 from seto.tokenizer import SetoTokenizer
 
 
+def _zip_member(names: list[str], filename: str, exclude: str = "") -> str:
+    matches = [
+        name for name in names
+        if (name == filename or name.endswith("/" + filename))
+        and (not exclude or exclude not in "/" + name)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one {filename} in checkpoint ZIP, found {matches}")
+    return matches[0]
+
+
 def load_model(checkpoint_path: str, device: str = "auto"):
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    config_path = os.path.join(checkpoint_path, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config_dict = json.load(f)
-        config = ModelConfig(**config_dict)
+    path = Path(checkpoint_path)
+    if path.suffix == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            config_member = _zip_member(names, "config.json", "/tokenizer/")
+            config_dict = json.loads(archive.read(config_member).decode("utf-8"))
+            model_member = _zip_member(names, "model.pt")
+            with archive.open(model_member) as model_file:
+                state_dict = torch.load(
+                    model_file, map_location="cpu", weights_only=True
+                )
     else:
-        config = ModelConfig()
+        if path.is_dir():
+            config_path = path / "config.json"
+            weights_path = path / "model.pt"
+        else:
+            config_path = path.with_name("config.json")
+            weights_path = path
+        if not config_path.exists():
+            raise FileNotFoundError(f"Model config not found: {config_path}")
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Model weights not found: {weights_path}")
+        with config_path.open() as config_file:
+            config_dict = json.load(config_file)
+        state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
 
+    expected_fields = {field.name for field in dataclasses.fields(ModelConfig)}
+    missing_fields = sorted(expected_fields - set(config_dict))
+    unknown_fields = sorted(set(config_dict) - expected_fields)
+    if missing_fields or unknown_fields:
+        raise ValueError(
+            f"Invalid ModelConfig; missing={missing_fields}, unknown={unknown_fields}"
+        )
+    config = ModelConfig(**config_dict)
     model = SetoLM(config)
-
-    weights_path = os.path.join(checkpoint_path, "model.pt")
-    if not os.path.exists(weights_path):
-        weights_path = checkpoint_path
-
-    state_dict = torch.load(weights_path, map_location=device, weights_only=True)
     model.load_state_dict(state_dict)
+    del state_dict
     model = model.to(device)
     model.eval()
 
     return model, config
+
+
+def load_tokenizer(checkpoint_path: str, tokenizer_path: str | None = None):
+    if tokenizer_path:
+        tokenizer_override = Path(tokenizer_path)
+        if tokenizer_override.suffix != ".zip":
+            return SetoTokenizer.from_pretrained(tokenizer_path)
+        with zipfile.ZipFile(tokenizer_override) as archive:
+            names = archive.namelist()
+            tokenizer_member = _zip_member(names, "tokenizer.json")
+            tokenizer_json = archive.read(tokenizer_member).decode("utf-8")
+            config_matches = [
+                name for name in names
+                if name == "config.json" or name.endswith("/config.json")
+            ]
+            config = (
+                json.loads(archive.read(config_matches[0]).decode("utf-8"))
+                if len(config_matches) == 1
+                else None
+            )
+        return SetoTokenizer.from_serialized(tokenizer_json, config)
+
+    path = Path(checkpoint_path)
+    if path.suffix == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            tokenizer_member = _zip_member(names, "tokenizer/tokenizer.json")
+            config_member = _zip_member(names, "tokenizer/config.json")
+            tokenizer_json = archive.read(tokenizer_member).decode("utf-8")
+            config = json.loads(archive.read(config_member).decode("utf-8"))
+        return SetoTokenizer.from_serialized(tokenizer_json, config)
+
+    model_dir = path if path.is_dir() else path.parent
+    candidate = model_dir / "tokenizer"
+    if not (candidate / "tokenizer.json").exists():
+        raise FileNotFoundError(
+            f"Packaged tokenizer not found at {candidate}; pass --tokenizer"
+        )
+    return SetoTokenizer.from_pretrained(str(candidate))
 
 
 @torch.no_grad()
@@ -84,6 +158,7 @@ def generate(
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
 
+@torch.inference_mode()
 def chat(model, tokenizer, device, system_prompt=None):
     print("Seto Chat (type 'quit' to exit, 'clear' to reset)")
     print("-" * 50)
@@ -152,8 +227,15 @@ def chat(model, tokenizer, device, system_prompt=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Chat with Seto")
-    parser.add_argument("--model", required=True, help="Path to model checkpoint directory")
-    parser.add_argument("--tokenizer", required=True, help="Path to tokenizer directory")
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Path to final ZIP, extracted model directory, or model.pt",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        help="Tokenizer directory override (auto-loaded from packaged model)",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--system-prompt", default="Ты Seto — полезный русскоязычный ассистент.")
     args = parser.parse_args()
@@ -166,8 +248,8 @@ def main():
     model, config = load_model(args.model, device)
     print(f"Model: {config.num_params():,} params")
 
-    print(f"Loading tokenizer from {args.tokenizer}...")
-    tokenizer = SetoTokenizer.from_pretrained(args.tokenizer)
+    print("Loading tokenizer...")
+    tokenizer = load_tokenizer(args.model, args.tokenizer)
     print(f"Vocab: {len(tokenizer)}")
 
     chat(model, tokenizer, device, args.system_prompt)

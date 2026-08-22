@@ -53,6 +53,17 @@ torchrun --nproc_per_node=2 scripts/train.py \
 python scripts/chat.py --model output/final_pretrain --tokenizer seto-tokenizer
 ```
 
+Final exports package model config and tokenizer, so SFT ZIPs can be opened
+directly without selecting architecture manually:
+
+```bash
+python scripts/chat.py --model output/final_sft.zip
+python scripts/chat.py --model output/final_sft/model.pt
+```
+
+Use `--tokenizer PATH` only for older exports that did not package tokenizer
+files recursively.
+
 ## Data
 
 ### Pretrain

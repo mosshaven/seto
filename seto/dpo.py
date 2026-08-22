@@ -249,8 +249,13 @@ class DPOTrainer:
                         running_loss = 0.0
                         start_time = time.time()
 
-                    if self.global_step % self.config.save_every == 0 and self.is_main:
-                        self._save()
+                    if self.global_step % self.config.save_every == 0:
+                        if torch.distributed.is_initialized():
+                            torch.distributed.barrier()
+                        if self.is_main:
+                            self._save()
+                        if torch.distributed.is_initialized():
+                            torch.distributed.barrier()
 
     def _save(self):
         import random

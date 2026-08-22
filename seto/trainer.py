@@ -4,6 +4,7 @@ import math
 import os
 import random
 import time
+from datetime import timedelta
 from typing import Optional
 
 import numpy as np
@@ -22,7 +23,8 @@ def setup_distributed(local_rank: int):
     # torchrun already sets MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
     # Only call init_process_group if torchrun didn't already do it
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+        # Rank 0 can spend several minutes writing multi-gigabyte optimizer state.
+        dist.init_process_group(backend="nccl", timeout=timedelta(hours=1))
     torch.cuda.set_device(local_rank)
 
 
@@ -258,14 +260,23 @@ class SetoTrainer:
 
                     if self.global_step % self.config.eval_every == 0 and self.val_loader is not None:
                         val_loss = self.evaluate()
+                        if dist.is_initialized():
+                            dist.barrier()
                         if self.is_main:
                             print(f"  Eval @ step {self.global_step}: val_loss={val_loss:.4f}")
                             if val_loss < self.best_val_loss:
                                 self.best_val_loss = val_loss
                                 self._save_checkpoint(val_loss, is_best=True)
+                        if dist.is_initialized():
+                            dist.barrier()
 
-                    if self.global_step % self.config.save_every == 0 and self.is_main:
-                        self._save_checkpoint(running_loss / max(1, self.config.log_every))
+                    if self.global_step % self.config.save_every == 0:
+                        if dist.is_initialized():
+                            dist.barrier()
+                        if self.is_main:
+                            self._save_checkpoint(running_loss / max(1, self.config.log_every))
+                        if dist.is_initialized():
+                            dist.barrier()
 
     @torch.no_grad()
     def evaluate(self) -> float:

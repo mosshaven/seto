@@ -83,7 +83,8 @@ def save_checkpoint(
         with zf.open("model.pt", "w") as f:
             torch.save(state_dict, f)
 
-        with zf.open("optimizer.pt", "w") as f:
+        # Optimizer state can exceed ZIP's 4 GiB per-entry limit.
+        with zf.open("optimizer.pt", "w", force_zip64=True) as f:
             torch.save(optimizer.state_dict(), f)
 
         if scheduler is not None:

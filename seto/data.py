@@ -70,12 +70,19 @@ class ShardDataset(Dataset):
 
 
 class SFTDataset(Dataset):
-    """SFT dataset with chat template. Loss only on assistant turns."""
+    """SFT dataset with chat template. Multi-turn: splits into per-turn examples.
+
+    For a conversation [system, user1, assistant1, user2, assistant2]:
+      - Example 1: prompt=[system, user1], train on assistant1
+      - Example 2: prompt=[system, user1, assistant1, user2], train on assistant2
+
+    Loss only on assistant (and tool_call) turns. User/system/tool_result = context.
+    """
 
     def __init__(self, data_dir: str, seq_len: int = 1024, tokenizer=None, max_samples: int = 100000):
         self.seq_len = seq_len
         self.tokenizer = tokenizer
-        self.data = []
+        self.examples = []
 
         data_path = Path(data_dir)
         files = list(data_path.rglob("*.jsonl")) + list(data_path.rglob("*.json"))
@@ -89,7 +96,7 @@ class SFTDataset(Dataset):
                                 obj = json.loads(line)
                                 messages = obj.get("messages", obj.get("conversations", []))
                                 if messages:
-                                    self.data.append(messages)
+                                    self._add_multiturn(messages)
                             except json.JSONDecodeError:
                                 continue
                 elif f.suffix == ".json":
@@ -99,47 +106,68 @@ class SFTDataset(Dataset):
                             for item in obj:
                                 messages = item.get("messages", item.get("conversations", []))
                                 if messages:
-                                    self.data.append(messages)
+                                    self._add_multiturn(messages)
             except Exception:
                 continue
 
-            if len(self.data) >= max_samples:
+            if len(self.examples) >= max_samples:
                 break
 
-        print(f"Loaded {len(self.data)} SFT samples from {data_dir}")
+        print(f"Loaded {len(self.examples)} SFT examples from {data_dir} "
+              f"({len(files)} files, multi-turn split)")
+
+    def _add_multiturn(self, messages: list):
+        """Split multi-turn conversation into per-turn training examples."""
+        # Find all assistant turns
+        assistant_indices = [i for i, m in enumerate(messages)
+                             if m.get("role") in ("assistant",)]
+
+        if not assistant_indices:
+            return
+
+        for assistant_idx in assistant_indices:
+            # Prompt = all messages up to (but not including) this assistant turn
+            prompt_messages = messages[:assistant_idx]
+            # Completion = this assistant turn
+            completion = messages[assistant_idx]
+
+            if prompt_messages and completion.get("content"):
+                self.examples.append({
+                    "prompt": prompt_messages,
+                    "completion": completion,
+                })
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.examples)
 
     def __getitem__(self, idx: int) -> dict:
-        messages = self.data[idx]
+        example = self.examples[idx]
+        prompt_messages = example["prompt"]
+        completion = example["completion"]
 
         if self.tokenizer:
-            # Prompt: all messages except last (assistant response)
-            prompt_messages = messages[:-1]
             prompt_text = self.tokenizer.apply_chat_template(
                 prompt_messages, add_generation_prompt=True,
             )
             prompt_ids = self.tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
 
-            # Answer: last assistant message + EOS
-            answer = messages[-1].get("content", "")
-            answer_ids = self.tokenizer.encode(answer, add_bos=False, add_eos=True)
+            answer_text = completion.get("content", "")
+            answer_ids = self.tokenizer.encode(answer_text, add_bos=False, add_eos=True)
 
-            # Full sequence: prompt + answer
             full_ids = prompt_ids + answer_ids
             prompt_len = len(prompt_ids)
         else:
             full_ids = []
             prompt_len = 0
-            for i, msg in enumerate(messages):
+            for msg in prompt_messages:
                 content = msg.get("content", "")
                 for ch in content:
                     full_ids.append(ord(ch) % 48000)
-                if i < len(messages) - 1:
-                    prompt_len = len(full_ids)
-            # Add EOS
-            full_ids.append(2)
+            prompt_len = len(full_ids)
+            answer = completion.get("content", "")
+            for ch in answer:
+                full_ids.append(ord(ch) % 48000)
+            full_ids.append(2)  # EOS
 
         # Pad/truncate
         if len(full_ids) < self.seq_len:
@@ -151,9 +179,7 @@ class SFTDataset(Dataset):
         input_ids = torch.tensor(full_ids[:-1], dtype=torch.long)
         labels = torch.tensor(full_ids[1:], dtype=torch.long)
 
-        # Mask prompt tokens and padding
-        # After shift: label at position t corresponds to input token at t+1
-        # So prompt tokens (positions 0..prompt_len-2 in labels) get -100
+        # Mask prompt tokens and padding in labels
         labels[:prompt_len - 1] = -100
         labels[input_ids == 0] = -100
 
@@ -207,9 +233,20 @@ class DPODataset(Dataset):
         rejected = pair.get("rejected", "")
 
         if self.tokenizer:
-            prompt_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
-            chosen_ids = self.tokenizer.encode(chosen, add_bos=False, add_eos=True)
-            rejected_ids = self.tokenizer.encode(rejected, add_bos=False, add_eos=True)
+            # Prompt can be string or list of messages
+            if isinstance(prompt, list):
+                prompt_text = self.tokenizer.apply_chat_template(
+                    prompt, add_generation_prompt=True,
+                )
+                prompt_ids = self.tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+            else:
+                prompt_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+
+            # Chosen/rejected can be string or message dict
+            chosen_text = chosen.get("content", chosen) if isinstance(chosen, dict) else chosen
+            rejected_text = rejected.get("content", rejected) if isinstance(rejected, dict) else rejected
+            chosen_ids = self.tokenizer.encode(chosen_text, add_bos=False, add_eos=True)
+            rejected_ids = self.tokenizer.encode(rejected_text, add_bos=False, add_eos=True)
         else:
             prompt_ids = [ord(c) % 48000 for c in prompt]
             chosen_ids = [ord(c) % 48000 for c in chosen] + [2]

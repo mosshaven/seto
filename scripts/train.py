@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument("--stage", required=True, choices=["pretrain", "cooldown", "sft", "dpo"])
     p.add_argument("--model-config", default="tiny", choices=["tiny", "small", "base"])
     p.add_argument("--data-dir", required=True, help="Directory with .bin shards or SFT/DPO data")
+    p.add_argument("--dataset", default=None, help="Alias for --data-dir (SFT/DPO JSONL)")
     p.add_argument("--output-dir", default="seto-output")
     p.add_argument("--tokenizer", default="seto-tokenizer")
     p.add_argument("--resume", default=None, help="Resume from checkpoint (same stage)")
@@ -56,6 +57,10 @@ def main():
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True)
 
     args = parse_args()
+
+    # --dataset overrides --data-dir for convenience
+    if args.dataset:
+        args.data_dir = args.dataset
 
     # Handle torchrun LOCAL_RANK FIRST
     if args.local_rank == -1 and "LOCAL_RANK" in os.environ:
@@ -125,6 +130,19 @@ def main():
 
         tokenizer = SetoTokenizer.from_pretrained(args.tokenizer)
         model = SetoLM(model_config)
+
+        # Add new special tokens to tokenizer if missing
+        new_tokens = [t for t in tokenizer.special_tokens.values()
+                      if tokenizer._tokenizer.token_to_id(t) is None]
+        if new_tokens:
+            tokenizer.add_special_tokens(new_tokens)
+
+        # Resize embeddings if tokenizer vocab > model vocab (new tokens added)
+        tok_vocab = len(tokenizer)
+        if tok_vocab > model_config.vocab_size:
+            if is_main:
+                print(f"Resizing embeddings: {model_config.vocab_size} -> {tok_vocab}", flush=True)
+            model.resize_embeddings(tok_vocab)
 
         if is_main:
             print(f"Model size: {sum(p.numel() * p.element_size() for p in model.parameters()) / 1e6:.1f} MB")

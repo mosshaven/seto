@@ -15,6 +15,8 @@ SPECIAL_TOKENS = {
     "system": "<|system|>",
     "user": "<|user|>",
     "assistant": "<|assistant|>",
+    "tool_call": "<|tool_call|>",
+    "tool_result": "<|tool_result|>",
 }
 
 
@@ -87,6 +89,19 @@ class SetoTokenizer:
     @property
     def eos_id(self) -> int:
         return self._tokenizer.token_to_id(SPECIAL_TOKENS["eos"])
+
+    @property
+    def tool_call_id(self) -> int:
+        return self._tokenizer.token_to_id(SPECIAL_TOKENS["tool_call"])
+
+    @property
+    def tool_result_id(self) -> int:
+        return self._tokenizer.token_to_id(SPECIAL_TOKENS["tool_result"])
+
+    def add_special_tokens(self, tokens: List[str]) -> int:
+        """Add new special tokens to existing tokenizer. Returns number added."""
+        added = self._tokenizer.add_special_tokens(tokens)
+        return added
 
     def encode(self, text: str, add_bos: bool = True, add_eos: bool = True) -> List[int]:
         encoding = self._tokenizer.encode(text)

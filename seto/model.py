@@ -180,3 +180,31 @@ class SetoLM(nn.Module):
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def resize_embeddings(self, new_vocab_size: int):
+        """Resize token embeddings and output head for new vocab size.
+        Copies existing weights, reinitializes new tokens.
+        Handles tied embeddings correctly.
+        """
+        old_vocab_size = self.config.vocab_size
+        if new_vocab_size == old_vocab_size:
+            return
+
+        old_weight = self.tok_embeddings.weight.data
+        new_embedding = nn.Embedding(new_vocab_size, self.config.d_model)
+        new_embedding.weight.data[:old_vocab_size] = old_weight
+        # Reinit new tokens with small values (same std as original init)
+        nn.init.normal_(new_embedding.weight.data[old_vocab_size:], mean=0.0, std=0.02)
+        self.tok_embeddings = new_embedding
+
+        if self.config.tie_embeddings:
+            self.output = nn.Linear(self.config.d_model, new_vocab_size, bias=False)
+            self.output.weight = self.tok_embeddings.weight
+        else:
+            old_out = self.output.weight.data
+            new_out = nn.Linear(self.config.d_model, new_vocab_size, bias=False)
+            new_out.weight.data[:old_vocab_size] = old_out
+            nn.init.normal_(new_out.weight.data[old_vocab_size:], mean=0.0, std=0.02)
+            self.output = new_out
+
+        self.config.vocab_size = new_vocab_size

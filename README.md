@@ -151,6 +151,25 @@ Preflight must report 15 SFT targets: 14 assistant and one tool call. Training
 must load the old checkpoint, resize vocabulary when needed, avoid shape
 mismatches, and produce finite loss.
 
+### First 50M-token SFT run
+
+`notebooks/kaggle-sft-v1-cell.py` is a single Kaggle cell for the first real
+SFT pass on 2x T4. It streams pinned public datasets, converts source-specific
+schemas, creates a deterministic 50,000-target mix, trains for 3,000 optimizer
+steps, and removes caches/checkpoints after successful final export.
+
+Target mix:
+
+- 40% UltraChat instructions
+- 11% cleaned WildChat multi-turn
+- 14% reviewed OASST human dialogue
+- 15% cleaned WildChat casual dialogue
+- 10% Russian instructions
+- 10% Hermes function calling
+
+OASST also admits Ukrainian conversations. Source revisions, licenses, counts,
+rejections, actual weights, and hashes are retained beside `final_sft.zip`.
+
 ## Training Notes
 
 - **FP16** for T4 (Turing) — no bf16 on T4

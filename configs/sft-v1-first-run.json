@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "base_dir": "..",
+  "seed": 42,
+  "target_examples": 50000,
+  "validation_paths": [],
+  "sources": [
+    {
+      "name": "ultrachat",
+      "paths": ["/kaggle/working/seto-sft-sources/ultrachat.jsonl"],
+      "weight": 0.40
+    },
+    {
+      "name": "wildchat_dialogue",
+      "paths": ["/kaggle/working/seto-sft-sources/wildchat-dialogue.jsonl"],
+      "weight": 0.11
+    },
+    {
+      "name": "oasst1",
+      "paths": ["/kaggle/working/seto-sft-sources/oasst1.jsonl"],
+      "weight": 0.14
+    },
+    {
+      "name": "wildchat_casual",
+      "paths": ["/kaggle/working/seto-sft-sources/wildchat-casual.jsonl"],
+      "weight": 0.15
+    },
+    {
+      "name": "russian",
+      "paths": ["/kaggle/working/seto-sft-sources/russian.jsonl"],
+      "weight": 0.10
+    },
+    {
+      "name": "tools",
+      "paths": ["/kaggle/working/seto-sft-sources/tools.jsonl"],
+      "weight": 0.10
+    }
+  ]
+}
